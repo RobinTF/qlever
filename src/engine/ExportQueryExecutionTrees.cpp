@@ -770,7 +770,7 @@ ExportQueryExecutionTrees::computeResultAsQLeverJSON(
   }
 
   nlohmann::json jsonSuffix;
-  jsonSuffix["resultsize"] = resultSize;
+  jsonSuffix["resultsize"] = query.hasSelectClause() ? result->idTable().size() : resultSize;
   jsonSuffix["time"]["total"] =
       absl::StrCat(requestTimer.msecs().count(), "ms");
   jsonSuffix["time"]["computeResult"] =
