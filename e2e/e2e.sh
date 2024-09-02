@@ -132,3 +132,13 @@ fi
 echo "ServerMain was successfully started, running queries ..."
 $PYTHON_BINARY "$PROJECT_DIR/e2e/queryit.py" "$PROJECT_DIR/e2e/scientists_queries.yaml" "http://localhost:9099" | tee "$BINARY_DIR/query_log.txt" || bail "Querying Server failed"
 popd
+
+checks=$(grep "No timeout check has been performed" "$BINARY_DIR/server_log.txt")
+
+if [ -n "$checks" ]; then
+  echo "The engine doesn't check for timeouts often enough:"
+  echo "$checks"
+  exit 1
+else
+  echo "Timeout checks are performed regularly"
+fi
