@@ -2644,6 +2644,7 @@ void QueryPlanner::GraphPatternPlanner::graphPatternOperationVisitor(Arg& arg) {
     if constexpr (std::is_same_v<T, p::GroupGraphPattern>) {
       if (std::holds_alternative<TripleComponent::Iri>(arg.graphSpec_)) {
         datasetBackup = planner_.activeDatasetClauses_;
+        planner_.activeGraphVariable_ = std::nullopt;
         planner_.activeDatasetClauses_.defaultGraphs_.emplace(
             {std::get<TripleComponent::Iri>(arg.graphSpec_)});
       } else if (std::holds_alternative<Variable>(arg.graphSpec_)) {
@@ -2669,6 +2670,23 @@ void QueryPlanner::GraphPatternPlanner::graphPatternOperationVisitor(Arg& arg) {
     if constexpr (std::is_same_v<T, p::Optional>) {
       for (auto& c : candidates) {
         c.type = SubtreePlan::OPTIONAL;
+      }
+    }
+    if constexpr (std::is_same_v<T, p::GroupGraphPattern>) {
+      if (std::holds_alternative<TripleComponent::Iri>(arg.graphSpec_) &&
+          graphVariableBackup.has_value()) {
+        for (auto& c : candidates) {
+          c._qet =
+              makeSubtreePlan<Bind>(
+                  qec_, std::move(c._qet),
+                  parsedQuery::Bind{
+                      sparqlExpression::SparqlExpressionPimpl{
+                          std::make_shared<sparqlExpression::IriExpression>(
+                              std::get<TripleComponent::Iri>(arg.graphSpec_)),
+                          "internal"},
+                      graphVariableBackup.value()})
+                  ._qet;
+        }
       }
     }
     visitGroupOptionalOrMinus(std::move(candidates));
