@@ -138,10 +138,10 @@ class MinusAndExistsRowHandler {
     if (indexBuffer_.empty() || indexBuffer_.back() != index) {
       indexBuffer_.push_back(index);
     }
-    if (!startIndex_.has_value()) {
+    if (!startIndex_.has_value() || startIndex_.value() > index) {
       startIndex_ = index;
     }
-    endIndex_ = index + 1;
+    endIndex_ = std::max(index + 1, endIndex_);
   }
 
   // Unwrap type `T` to get an `IdTableView<0>`, even if it's not an
@@ -215,10 +215,10 @@ class MinusAndExistsRowHandler {
   void addOptionalRow(size_t rowIndexA) {
     AD_EXPENSIVE_CHECK(inputLeft_.has_value());
     optionalIndexBuffer_.push_back(rowIndexA);
-    if (!startIndex_.has_value()) {
+    if (!startIndex_.has_value() || startIndex_.value() > rowIndexA) {
       startIndex_ = rowIndexA;
     }
-    endIndex_ = rowIndexA + 1;
+    endIndex_ = std::max(rowIndexA + 1, endIndex_);
   }
 
   // Move the result out after the last write. The function ensures, that the
