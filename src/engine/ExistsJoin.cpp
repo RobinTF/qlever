@@ -4,7 +4,9 @@
 
 #include "engine/ExistsJoin.h"
 
-#include "CallFixedSize.h"
+#include "engine/CallFixedSize.h"
+#include "engine/JoinHelpers.h"
+#include "engine/MinusAndExistsRowHandler.h"
 #include "engine/QueryPlanner.h"
 #include "engine/sparqlExpressions/ExistsExpression.h"
 #include "engine/sparqlExpressions/SparqlExpression.h"
@@ -84,23 +86,26 @@ size_t ExistsJoin::getCostEstimate() {
 // ____________________________________________________________________________
 Result ExistsJoin::computeResult(bool requestLaziness) {
   bool noJoinNecessary = joinColumns_.empty();
-  auto leftRes = left_->getResult(noJoinNecessary && requestLaziness);
+  // The lazy exists join implementation does only work if there's just a single
+  // join column. This might be extended in the future.
+  bool lazyJoinIsSupported = joinColumns_.size() == 1;
+  auto leftRes =
+      left_->getResult(noJoinNecessary ? requestLaziness : lazyJoinIsSupported);
   if (noJoinNecessary) {
     // For non-lazy results applying the limit introduces some overhead, but for
     // lazy results it ensures that we don't have to compute the whole result,
     // so we consider this a tradeoff worth to make.
     right_->setLimit({1});
   }
-  auto rightRes = right_->getResult();
-  const auto& right = rightRes->idTable();
+  auto rightRes =
+      right_->getResult(noJoinNecessary ? false : lazyJoinIsSupported);
 
-  if (!leftRes->isFullyMaterialized()) {
-    AD_CORRECTNESS_CHECK(noJoinNecessary);
+  if (noJoinNecessary && !leftRes->isFullyMaterialized()) {
     // Forward lazy result, otherwise let the existing code handle the join with
     // no column.
     return {Result::LazyResult{
                 ad_utility::OwningView{std::move(leftRes->idTables())} |
-                ql::views::transform([exists = !right.empty(),
+                ql::views::transform([exists = !rightRes->idTable().empty(),
                                       leftRes](Result::IdTableVocabPair& pair) {
                   // Make sure we keep this shared ptr alive until the result is
                   // completely consumed.
@@ -113,6 +118,11 @@ Result ExistsJoin::computeResult(bool requestLaziness) {
                 })},
             leftRes->sortedBy()};
   }
+  if (!leftRes->isFullyMaterialized() || !rightRes->isFullyMaterialized()) {
+    return lazyExistsJoin(std::move(leftRes), std::move(rightRes),
+                          requestLaziness);
+  }
+  const auto& right = rightRes->idTable();
   const auto& left = leftRes->idTable();
 
   // We reuse the generic `zipperJoinWithUndef` function, which has two two
@@ -235,4 +245,52 @@ std::unique_ptr<Operation> ExistsJoin::cloneImpl() const {
   newJoin->left_ = left_->clone();
   newJoin->right_ = right_->clone();
   return newJoin;
+}
+
+// _____________________________________________________________________________
+Result ExistsJoin::lazyExistsJoin(std::shared_ptr<const Result> left,
+                                  std::shared_ptr<const Result> right,
+                                  bool requestLaziness) {
+  // If both inputs are fully materialized, we can join them more
+  // efficiently.
+  AD_CONTRACT_CHECK(!left->isFullyMaterialized() ||
+                    !right->isFullyMaterialized());
+  // Currently only supports a single join column.
+  AD_CORRECTNESS_CHECK(joinColumns_.size() == 1);
+  ad_utility::JoinColumnMapping joinColMap{
+      joinColumns_, left_->getResultWidth(), joinColumns_.size()};
+
+  auto resultPermutation = joinColMap.permutationResult();
+  // Add exists column to the result permutation.
+  resultPermutation.emplace_back(resultPermutation.size());
+
+  auto action = [this, left = std::move(left), right = std::move(right),
+                 joinColMap = std::move(joinColMap)](
+                    std::function<void(IdTable&, LocalVocab&)> yieldTable) {
+    ad_utility::ExistsRowHandler rowAdder{
+        joinColumns_.size(), IdTable{getResultWidth(), allocator()},
+        cancellationHandle_, std::move(yieldTable)};
+    auto leftRange = resultToView(*left, joinColMap.permutationLeft());
+    auto rightRange = resultToView(*right, joinColMap.permutationRight());
+    std::visit(
+        [&rowAdder](auto& leftBlocks, auto& rightBlocks) {
+          ad_utility::zipperJoinForBlocksWithPotentialUndef(
+              leftBlocks, rightBlocks, std::less{}, rowAdder, {}, {},
+              std::true_type{});
+        },
+        leftRange, rightRange);
+    auto localVocab = std::move(rowAdder.localVocab());
+    return Result::IdTableVocabPair{std::move(rowAdder).resultTable(),
+                                    std::move(localVocab)};
+  };
+
+  if (requestLaziness) {
+    return {runLazyJoinAndConvertToGenerator(std::move(action),
+                                             std::move(resultPermutation)),
+            resultSortedOn()};
+  } else {
+    auto [idTable, localVocab] = action(ad_utility::noop);
+    applyPermutation(idTable, resultPermutation);
+    return {std::move(idTable), resultSortedOn(), std::move(localVocab)};
+  }
 }
