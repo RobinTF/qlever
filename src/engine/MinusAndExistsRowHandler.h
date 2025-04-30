@@ -64,6 +64,7 @@ struct MinusImpl {
                      const std::vector<size_t>&, size_t startIndex,
                      size_t endIndex, const IdTableView<0>& inputTable,
                      const CancellationAction& action) {
+    AD_EXPENSIVE_CHECK(ql::ranges::is_sorted(matchingIndices));
     size_t oldSize = idTable.size();
     AD_CORRECTNESS_CHECK(endIndex - startIndex >= matchingIndices.size());
     idTable.resize(oldSize + (endIndex - startIndex - matchingIndices.size()));
@@ -135,13 +136,23 @@ class MinusAndExistsRowHandler {
 
   void addRow(size_t index, size_t) {
     AD_EXPENSIVE_CHECK(inputLeft_.has_value());
-    if (indexBuffer_.empty() || indexBuffer_.back() != index) {
+    if (indexBuffer_.empty() || indexBuffer_.back() < index) {
       indexBuffer_.push_back(index);
+    } else {
+      // The indices must be strictly increasing (unless they are duplicates)
+      AD_EXPENSIVE_CHECK(
+          indexBuffer_.size() >= indexBuffer_.back() - index &&
+              indexBuffer_.at(indexBuffer_.size() - 1 -
+                              (indexBuffer_.back() - index)) == index,
+          "Non-sequential value was not a duplicate!");
     }
-    if (!startIndex_.has_value() || startIndex_.value() > index) {
+    if (!startIndex_.has_value()) {
       startIndex_ = index;
+    } else {
+      AD_EXPENSIVE_CHECK(startIndex_.value() <= index);
     }
-    endIndex_ = std::max(index + 1, endIndex_);
+    AD_EXPENSIVE_CHECK(endIndex_ <= index + 1);
+    endIndex_ = index + 1;
   }
 
   // Unwrap type `T` to get an `IdTableView<0>`, even if it's not an
@@ -215,10 +226,13 @@ class MinusAndExistsRowHandler {
   void addOptionalRow(size_t rowIndexA) {
     AD_EXPENSIVE_CHECK(inputLeft_.has_value());
     optionalIndexBuffer_.push_back(rowIndexA);
-    if (!startIndex_.has_value() || startIndex_.value() > rowIndexA) {
+    if (!startIndex_.has_value()) {
       startIndex_ = rowIndexA;
+    } else {
+      AD_EXPENSIVE_CHECK(startIndex_.value() < rowIndexA);
     }
-    endIndex_ = std::max(rowIndexA + 1, endIndex_);
+    AD_EXPENSIVE_CHECK(endIndex_ <= rowIndexA + 1);
+    endIndex_ = rowIndexA + 1;
   }
 
   // Move the result out after the last write. The function ensures, that the
