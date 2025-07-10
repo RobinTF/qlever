@@ -52,8 +52,9 @@ Result Minus::computeResult([[maybe_unused]] bool requestLaziness) {
              << leftResult->idTable().size() << " and "
              << rightResult->idTable().size() << endl;
 
-  IdTable idTable = computeMinus(leftResult->idTable(), rightResult->idTable(),
-                                 _matchedColumns);
+  IdTable idTable = CALL_FIXED_SIZE(
+      _matchedColumns.size(), &Minus::computeMinus, this, leftResult->idTable(),
+      rightResult->idTable(), _matchedColumns);
 
   LOG(DEBUG) << "Minus result computation done" << endl;
   // If only one of the two operands has a non-empty local vocabulary, share
@@ -113,9 +114,12 @@ auto Minus::makeUndefRangesChecker(bool left) const {
 }
 
 // _____________________________________________________________________________
+template <size_t NUM_JOIN_COLUMNS>
 IdTable Minus::computeMinus(
     const IdTable& left, const IdTable& right,
     const std::vector<std::array<ColumnIndex, 2>>& joinColumns) const {
+  AD_CONTRACT_CHECK(joinColumns.size() == NUM_JOIN_COLUMNS ||
+                    NUM_JOIN_COLUMNS == 0);
   if (left.empty()) {
     return IdTable{getResultWidth(), getExecutionContext()->getAllocator()};
   }
@@ -127,10 +131,12 @@ IdTable Minus::computeMinus(
   ad_utility::JoinColumnMapping joinColumnData{joinColumns, left.numColumns(),
                                                right.numColumns()};
 
-  IdTableView<0> joinColumnsLeft =
-      left.asColumnSubsetView(joinColumnData.jcsLeft());
-  IdTableView<0> joinColumnsRight =
-      right.asColumnSubsetView(joinColumnData.jcsRight());
+  IdTableView<NUM_JOIN_COLUMNS> joinColumnsLeft =
+      left.asColumnSubsetView(joinColumnData.jcsLeft())
+          .asStaticView<NUM_JOIN_COLUMNS>();
+  IdTableView<NUM_JOIN_COLUMNS> joinColumnsRight =
+      right.asColumnSubsetView(joinColumnData.jcsRight())
+          .asStaticView<NUM_JOIN_COLUMNS>();
 
   checkCancellation();
 

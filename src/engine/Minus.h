@@ -64,6 +64,7 @@ class Minus : public Operation {
    *        that should have resultWidth entries).
    *        This method is made public here for unit testing purposes.
    **/
+  template <size_t NUM_JOIN_COLUMNS>
   IdTable computeMinus(
       const IdTable& a, const IdTable& b,
       const vector<std::array<ColumnIndex, 2>>& matchedColumns) const;

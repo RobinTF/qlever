@@ -39,14 +39,14 @@ TEST(Minus, computeMinus) {
               qec, b.clone(),
               std::vector<std::optional<Variable>>{
                   Variable{"?b"}, Variable{"?a"}, std::nullopt, std::nullopt})};
-  IdTable res = m.computeMinus(a, b, jcls);
+  IdTable res = m.computeMinus<2>(a, b, jcls);
 
   EXPECT_EQ(res, makeIdTableFromVector({{1, 2, 1}, {5, 4, 1}, {8, 2, 3}}));
 
   // Test subtracting without matching columns
   res.clear();
   jcls.clear();
-  res = m.computeMinus(a, b, jcls);
+  res = m.computeMinus<0>(a, b, jcls);
   EXPECT_EQ(res, a);
 
   // Test minus with variable sized data.
@@ -70,7 +70,7 @@ TEST(Minus, computeMinus) {
                std::vector<std::optional<Variable>>{
                    Variable{"?a"}, Variable{"?b"}, std::nullopt})};
 
-  IdTable vres = vm.computeMinus(va, vb, jcls);
+  IdTable vres = vm.computeMinus<2>(va, vb, jcls);
 
   EXPECT_EQ(vres, makeIdTableFromVector({{7, 6, 5, 4, 3, 2}}));
 }
@@ -94,12 +94,12 @@ TEST(Minus, computeMinusWithEmptyTables) {
           std::vector<std::optional<Variable>>{Variable{"?a"}, std::nullopt})};
 
   {
-    IdTable res = m.computeMinus(empty, nonEmpty, jcls);
+    IdTable res = m.computeMinus<1>(empty, nonEmpty, jcls);
 
     EXPECT_EQ(res, empty);
   }
   {
-    IdTable res = m.computeMinus(nonEmpty, empty, jcls);
+    IdTable res = m.computeMinus<1>(nonEmpty, empty, jcls);
 
     EXPECT_EQ(res, nonEmpty);
   }
@@ -127,7 +127,7 @@ TEST(Minus, computeMinusWithUndefined) {
               std::vector<std::optional<Variable>>{
                   Variable{"?b"}, Variable{"?a"}, std::nullopt})};
 
-  IdTable res = m.computeMinus(a, b, jcls);
+  IdTable res = m.computeMinus<2>(a, b, jcls);
   EXPECT_EQ(res, makeIdTableFromVector({{U, U, 10}, {1, U, 12}, {5, 4, 13}}));
 }
 
