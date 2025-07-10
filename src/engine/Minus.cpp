@@ -153,15 +153,21 @@ IdTable Minus::computeMinus(
             ql::ranges::lexicographical_compare,
             [&markForRemoval](const auto& leftIt, const auto& rightIt) {
               const auto& leftRow = *leftIt;
-              const auto& rightRow = *rightIt;
-              bool onlyMatchesBecauseOfUndef = ql::ranges::all_of(
-                  ::ranges::views::zip(leftRow, rightRow),
-                  [](const auto& tuple) {
-                    const auto& [leftId, rightId] = tuple;
-                    return leftId.isUndefined() || rightId.isUndefined();
-                  });
-              if (!onlyMatchesBecauseOfUndef) {
+              if constexpr (ad_utility::SimilarToAny<
+                                ad_utility::Noop, decltype(findUndefLeft),
+                                decltype(findUndefRight)>) {
                 markForRemoval(leftIt);
+              } else {
+                const auto& rightRow = *rightIt;
+                bool onlyMatchesBecauseOfUndef = ql::ranges::all_of(
+                    ::ranges::views::zip(leftRow, rightRow),
+                    [](const auto& tuple) {
+                      const auto& [leftId, rightId] = tuple;
+                      return leftId.isUndefined() || rightId.isUndefined();
+                    });
+                if (!onlyMatchesBecauseOfUndef) {
+                  markForRemoval(leftIt);
+                }
               }
             },
             std::move(findUndefLeft), std::move(findUndefRight), {},
