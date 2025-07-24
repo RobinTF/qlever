@@ -53,15 +53,24 @@ class FsstDecoder {
   explicit FsstDecoder(const fsst_decoder_t& decoder) : decoder_{decoder} {}
 
   // Decompress a  single string.
+  std::string_view decompressView(std::string_view str,
+                                  std::string_view targetBuffer) const {
+    auto cast = detail::castToUnsignedPtr;
+    AD_CORRECTNESS_CHECK(targetBuffer.size() >= 8 * str.size());
+    size_t size = fsst_decompress(&decoder_, str.size(), cast(str.data()),
+                                  targetBuffer.size(),
+                                  cast(const_cast<char*>(targetBuffer.data())));
+    // FSST compresses at most by a factor of 8.
+    AD_CORRECTNESS_CHECK(size <= targetBuffer.size());
+    return {targetBuffer.data(), size};
+  }
+
+  // Decompress a  single string.
   std::string decompress(std::string_view str) const {
     std::string output;
-    auto cast = detail::castToUnsignedPtr;
     output.resize(8 * str.size());
-    size_t size = fsst_decompress(&decoder_, str.size(), cast(str.data()),
-                                  output.size(), cast(output.data()));
-    // FSST compresses at most by a factor of 8.
-    AD_CORRECTNESS_CHECK(size <= output.size());
-    output.resize(size);
+    auto view = decompressView(str, output);
+    output.resize(view.size());
     return output;
   }
   // Allow this type to be trivially serializable,
@@ -94,19 +103,46 @@ class FsstRepeatedDecoder {
   // `getDecoder()` on that encoder.
   explicit FsstRepeatedDecoder(Decoders decoders) : decoders_{decoders} {}
 
-  // Decompress a  single string.
+  static consteval size_t ipow(size_t base, size_t exp) {
+    size_t result = 1;
+    for (size_t i = 0; i < exp; ++i) {
+      result *= base;
+    }
+    return result;
+  }
+
+  static consteval size_t computeFactor() {
+    size_t sum = 0;
+    for (size_t i = 1; i <= N; ++i) {
+      sum += ipow(8, i);
+    }
+    return sum;
+  }
+
+  // Decompress a single string.
   std::string decompress(std::string_view str) const {
     std::string result;
+    result.resize(str.size() * computeFactor());
+    size_t bufferOffset = result.size();
     std::string_view nextInput = str;
-    auto decompressSingle = [&result, &nextInput](const FsstDecoder& decoder) {
-      result = decoder.decompress(nextInput);
-      nextInput = result;
+    auto decompressSingle = [this, &result, &nextInput, &bufferOffset,
+                             &str]<size_t index>() {
+      size_t currentSize = str.size() * ipow(8, index + 1);
+      bufferOffset -= currentSize;
+      std::string_view currentBufferSlice =
+          std::string_view{result}.substr(bufferOffset, currentSize);
+      nextInput = decoders_[N - index - 1].decompressView(nextInput,
+                                                          currentBufferSlice);
     };
 
     // Force loop unrolling in reverse.
-    [this, &decompressSingle]<std::size_t... Is>(std::index_sequence<Is...>) {
-      (decompressSingle(decoders_[N - Is - 1]), ...);
+    [&decompressSingle]<std::size_t... Is>(std::index_sequence<Is...>) {
+      (decompressSingle.template operator()<Is>(), ...);
     }(std::make_index_sequence<N>());
+
+    AD_EXPENSIVE_CHECK(bufferOffset == 0);
+
+    result.resize(nextInput.size());
     return result;
   }
   // Allow this type to be trivially serializable,
