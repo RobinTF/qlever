@@ -103,7 +103,10 @@ class FsstRepeatedDecoder {
       nextInput = result;
     };
 
-    ql::ranges::for_each(ql::views::reverse(decoders_), decompressSingle);
+    // Force loop unrolling in reverse.
+    [this, &decompressSingle]<std::size_t... Is>(std::index_sequence<Is...>) {
+      (decompressSingle(decoders_[N - Is - 1]), ...);
+    }(std::make_index_sequence<N>());
     return result;
   }
   // Allow this type to be trivially serializable,
