@@ -42,9 +42,6 @@ class FsstDecoder {
  private:
   fsst_decoder_t decoder_;
 
-  // 10KiB
-  static constexpr size_t BUFFER_SIZE = 1u << 10;
-
  public:
   // The default constructor does lead to an invalid decoder, but is required
   // for the serialization module. Don't use it.
@@ -56,29 +53,17 @@ class FsstDecoder {
   explicit FsstDecoder(const fsst_decoder_t& decoder) : decoder_{decoder} {}
 
   // Decompress a  single string.
-  std::string_view decompressView(std::string_view str, auto& buffer) const {
-    AD_EXPENSIVE_CHECK(str.size() * 8 <= buffer.size());
-    auto cast = detail::castToUnsignedPtr;
-    size_t size = fsst_decompress(&decoder_, str.size(), cast(str.data()),
-                                  buffer.size(), cast(buffer.data()));
-    // FSST compresses at most by a factor of 8.
-    AD_EXPENSIVE_CHECK(size <= buffer.size());
-    return {buffer.data(), size};
-  }
-
-  // Decompress a  single string.
   std::string decompress(std::string_view str) const {
-    // 10KiB buffer should be large enough for most vocab entries.
-    thread_local std::array<char, BUFFER_SIZE> tempBuffer;
-    if (str.size() * 8 <= tempBuffer.size()) [[likely]] {
-      return std::string{decompressView(str, tempBuffer)};
-    }
-    std::string largeBuffer(str.size() * 8, '\0');
-    auto view = decompressView(str, largeBuffer);
-    largeBuffer.resize(view.size());
-    return largeBuffer;
+    std::string output;
+    auto cast = detail::castToUnsignedPtr;
+    output.resize(8 * str.size());
+    size_t size = fsst_decompress(&decoder_, str.size(), cast(str.data()),
+                                  output.size(), cast(output.data()));
+    // FSST compresses at most by a factor of 8.
+    AD_CORRECTNESS_CHECK(size <= output.size());
+    output.resize(size);
+    return output;
   }
-
   // Allow this type to be trivially serializable,
   CPP_template(typename T, typename U)(
       requires ql::concepts::same_as<T, FsstDecoder>) friend std::true_type
