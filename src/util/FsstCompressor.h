@@ -45,9 +45,6 @@ class FsstDecoder {
   // 10KiB
   static constexpr size_t BUFFER_SIZE = 1u << 10;
 
-  // 10KiB buffer should be large enough for most vocab entries.
-  mutable std::array<char, BUFFER_SIZE> tempBuffer_;
-
  public:
   // The default constructor does lead to an invalid decoder, but is required
   // for the serialization module. Don't use it.
@@ -71,8 +68,10 @@ class FsstDecoder {
 
   // Decompress a  single string.
   std::string decompress(std::string_view str) const {
-    if (str.size() * 8 <= tempBuffer_.size()) [[likely]] {
-      return std::string{decompressView(str, tempBuffer_)};
+    // 10KiB buffer should be large enough for most vocab entries.
+    thread_local std::array<char, BUFFER_SIZE> tempBuffer;
+    if (str.size() * 8 <= tempBuffer.size()) [[likely]] {
+      return std::string{decompressView(str, tempBuffer)};
     }
     std::string largeBuffer(str.size() * 8, '\0');
     auto view = decompressView(str, largeBuffer);
