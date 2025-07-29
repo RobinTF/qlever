@@ -13,6 +13,20 @@
 #include "util/CompilerExtensions.h"
 #include "util/Exception.h"
 
+struct Filler {
+  // Should conceptually be bool, but doesn't allow the compiler to use
+  // memset in `matchLeft`.
+  std::vector<char> matchTracker_;
+
+  explicit Filler(size_t size) : matchTracker_(size, 0) {}
+
+  AD_ALWAYS_INLINE void track(size_t offset, size_t size, size_t) {
+    AD_EXPENSIVE_CHECK(offset + size <= matchTracker_.size());
+    ql::ranges::fill(matchTracker_.begin() + offset,
+                     matchTracker_.begin() + offset + size, 1);
+  }
+};
+
 class NestedLoopJoin {
   std::vector<std::array<ColumnIndex, 2>> joinColumns_;
   std::shared_ptr<const Result> leftResult_;
@@ -32,12 +46,12 @@ class NestedLoopJoin {
   // Checks with entries in `rightTable` match entries in `leftTable`, and
   // writes for the matching row indices on the left the value `true` into
   // `matchTracker`.
-  template <int JOIN_COLUMNS>
-  AD_ALWAYS_INLINE static void matchLeft(std::vector<char>& matchTracker,
+  template <typename T, int JOIN_COLUMNS>
+  AD_ALWAYS_INLINE static void matchLeft(T& matchTracker,
                                          IdTableView<JOIN_COLUMNS> leftTable,
                                          IdTableView<JOIN_COLUMNS> rightTable) {
-    AD_CORRECTNESS_CHECK(matchTracker.size() == leftTable.size());
     auto leftColumns = leftTable.getColumns();
+    size_t rightIndex = 0;
     for (const auto& rightRow : rightTable) {
       size_t leftOffset = 0;
       size_t leftSize = leftTable.size();
@@ -53,16 +67,15 @@ class NestedLoopJoin {
         }
         leftOffset = ql::ranges::distance(leftCol.begin(), subrange.begin());
       }
-      ql::ranges::fill(matchTracker.begin() + leftOffset,
-                       matchTracker.begin() + leftOffset + leftSize, 1);
+      matchTracker.track(leftOffset, leftSize, rightIndex);
+      ++rightIndex;
     }
   }
 
  public:
-  std::vector<char> computeTracker() {
-    // Should conceptually be bool, but doesn't allow the compiler to use
-    // memset in `matchLeft`.
-    std::vector<char> matchTracker(leftResult_->idTable().size(), 0);
+  // ___________________________________________________________________________
+  std::vector<char> computeExistance() {
+    Filler matchTracker{leftResult_->idTable().size()};
     std::vector<ColumnIndex> leftColumns;
     std::vector<ColumnIndex> rightColumns;
     for (const auto& [leftCol, rightCol] : joinColumns_) {
@@ -90,7 +103,7 @@ class NestedLoopJoin {
             }
           }
         });
-    return matchTracker;
+    return std::move(matchTracker.matchTracker_);
   }
 };
 
