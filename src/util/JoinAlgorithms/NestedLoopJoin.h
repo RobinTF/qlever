@@ -145,7 +145,7 @@ class OptionalJoinRange
     }
     auto next = rightTables_.get();
     if (next.has_value()) {
-      auto& [idTable, rightVocab] = next.value();
+      auto& [idTable, localVocab] = next.value();
       computeMatches_(matchTracker_, idTable);
       IdTable resultTable{resultWidth_, leftTable_.getAllocator()};
       matchTracker_.materializeTables(
@@ -153,9 +153,7 @@ class OptionalJoinRange
           leftTable_.asColumnSubsetView(joinColumnData_.permutationLeft()),
           idTable.asColumnSubsetView(joinColumnData_.permutationRight()));
       resultTable.setColumnSubset(joinColumnData_.permutationResult());
-      LocalVocab localVocab = LocalVocab::merge(
-          std::array<const LocalVocab*, 2>{&rightVocab, &leftVocab_});
-      std::cout << "b: " << resultTable.numColumns() << std::endl;
+      localVocab.mergeWith(leftVocab_);
       return Result::IdTableVocabPair{std::move(resultTable),
                                       std::move(localVocab)};
     }
@@ -168,7 +166,6 @@ class OptionalJoinRange
       return std::nullopt;
     }
     resultTable.setColumnSubset(joinColumnData_.permutationResult());
-    std::cout << "a: " << resultTable.numColumns() << std::endl;
     return Result::IdTableVocabPair{std::move(resultTable), leftVocab_.clone()};
   }
 };
