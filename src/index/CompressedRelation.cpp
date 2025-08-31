@@ -229,7 +229,10 @@ CompressedRelationReader::asyncParallelBlockGenerator(
 auto CompressedRelationReader::FilterDuplicatesAndGraphs::isGraphAllowedLambda()
     const {
   AD_CORRECTNESS_CHECK(desiredGraphs_.has_value());
-  return [this](Id graph) { return desiredGraphs_.value().contains(graph); };
+  AD_CORRECTNESS_CHECK(!defaultGraph_.isUndefined());
+  return [this](Id graph) {
+    return desiredGraphs_.value().contains(graph) && graph != defaultGraph_;
+  };
 }
 
 // _____________________________________________________________________________
@@ -624,11 +627,10 @@ DecompressedBlock CompressedRelationReader::readPossiblyIncompleteBlock(
       ql::views::iota(ADDITIONAL_COLUMN_GRAPH_ID,
                       blockMetadata.offsetsAndCompressedSize_.size()),
       std::back_inserter(allAdditionalColumns));
-  ScanSpecification specForAllColumns{std::nullopt,
-                                      std::nullopt,
-                                      std::nullopt,
-                                      {},
-                                      scanConfig.graphFilter_.desiredGraphs_};
+  ScanSpecification specForAllColumns{
+      std::nullopt, std::nullopt,
+      std::nullopt, scanSpec.getDefaultGraph(),
+      {},           scanConfig.graphFilter_.desiredGraphs_};
   auto config = getScanConfig(specForAllColumns,
                               std::move(allAdditionalColumns), locatedTriples);
   bool manuallyDeleteGraphColumn = scanConfig.graphFilter_.deleteGraphColumn_;
@@ -1166,7 +1168,8 @@ auto CompressedRelationReader::getFirstAndLastTriple(
   const auto& scanSpec = metadataAndBlocks.scanSpec_;
 
   ScanSpecification scanSpecForAllColumns{
-      std::nullopt, std::nullopt, std::nullopt, {}, std::nullopt};
+      std::nullopt, std::nullopt, std::nullopt, scanSpec.getDefaultGraph(),
+      {},           std::nullopt};
   auto config =
       getScanConfig(scanSpecForAllColumns,
                     std::array{ColumnIndex{ADDITIONAL_COLUMN_GRAPH_ID}},
@@ -1715,7 +1718,8 @@ auto CompressedRelationReader::getScanConfig(
     return {idx, deleteColumn};
   }();
   FilterDuplicatesAndGraphs graphFilter{scanSpec.graphsToFilter(),
-                                        graphColumnIndex, deleteGraphColumn};
+                                        graphColumnIndex, deleteGraphColumn,
+                                        scanSpec.getDefaultGraph()};
   return {std::move(columnIndices), std::move(graphFilter), locatedTriples};
 }
 
