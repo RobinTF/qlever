@@ -228,10 +228,12 @@ CompressedRelationReader::asyncParallelBlockGenerator(
 // _____________________________________________________________________________
 auto CompressedRelationReader::FilterDuplicatesAndGraphs::isGraphAllowedLambda()
     const {
-  AD_CORRECTNESS_CHECK(desiredGraphs_.has_value());
   AD_CORRECTNESS_CHECK(!defaultGraph_.isUndefined());
   return [this](Id graph) {
-    return desiredGraphs_.value().contains(graph) && graph != defaultGraph_;
+    std::cout << graph << " | " << defaultGraph_ << std::endl;
+    return (!desiredGraphs_.has_value() ||
+            desiredGraphs_.value().contains(graph)) &&
+           graph != defaultGraph_;
   };
 }
 
@@ -239,7 +241,7 @@ auto CompressedRelationReader::FilterDuplicatesAndGraphs::isGraphAllowedLambda()
 bool CompressedRelationReader::FilterDuplicatesAndGraphs::
     blockNeedsFilteringByGraph(const CompressedBlockMetadata& metadata) const {
   if (!desiredGraphs_.has_value()) {
-    return false;
+    return !deleteGraphColumn_;
   }
   if (!metadata.graphInfo_.has_value()) {
     return true;
