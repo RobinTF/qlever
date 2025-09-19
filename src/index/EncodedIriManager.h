@@ -218,6 +218,7 @@ class EncodedIriManagerImpl {
     return result;
   }
 
+ public:
   // The inverse of `encodeDecimalToNBit`. The result is appended to the
   // `result` string.
   static void decodeDecimalFrom64Bit(std::string& result, uint64_t encoded) {

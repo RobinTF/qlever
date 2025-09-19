@@ -130,6 +130,159 @@ Result Service::computeResult(bool requestLaziness) {
   }
 }
 
+namespace {
+template <typename T>
+T read(auto& it, const auto& end) {
+  T buffer;
+  std::span bufferView{reinterpret_cast<char*>(&buffer), sizeof(T)};
+  for (char& byte : bufferView) {
+    if (it == end) {
+      throw std::runtime_error{"Stream ended unexpectedly."};
+    }
+    byte = static_cast<char>(*it);
+    ql::ranges::next(it);
+  }
+  return buffer;
+}
+
+std::string readString(auto& it, const auto& end) {
+  std::string buffer;
+  buffer.resize(read<size_t>(it, end));
+  for (char& byte : buffer) {
+    if (it == end) {
+      throw std::runtime_error{"Stream ended unexpectedly."};
+    }
+    byte = static_cast<char>(*it);
+    ql::ranges::next(it);
+  }
+  return buffer;
+}
+}  // namespace
+
+// _____________________________________________________________________________
+Result Service::computeBinaryResult(bool requestLaziness,
+                                    HttpOrHttpsResponse response) {
+  // TODO<RobinTF> honor laziness setting.
+  (void)requestLaziness;
+  auto bytes = response.body_ | ql::views::join;
+  auto it = ql::ranges::begin(bytes);
+  auto end = ql::ranges::end(bytes);
+
+  auto magicBytes = read<std::array<char, 13>>(it, end);
+
+  // If we don't get the magic bytes this is not a QLever instance on the other
+  // end.
+  AD_CONTRACT_CHECK(std::string_view(magicBytes.data(), magicBytes.size()) ==
+                    "QLEVER.EXPORT");
+
+  auto version = read<uint16_t>(it, end);
+
+  // We only support version 0.
+  AD_CONTRACT_CHECK(version == 0);
+
+  auto numPrefixes = read<uint8_t>(it, end);
+  std::vector<std::string> prefixes;
+  prefixes.reserve(numPrefixes);
+
+  for ([[maybe_unused]] auto _ : ad_utility::integerRange(numPrefixes)) {
+    prefixes.emplace_back(readString(it, end));
+  }
+
+  auto numColumns = read<uint16_t>(it, end);
+
+  IdTable result{numColumns, allocator()};
+
+  // Special case 0 columns. In this case just return the correct amount of
+  // columns.
+  if (numColumns == 0) {
+    auto numRows = read<uint64_t>(it, end);
+    result.resize(numRows);
+    return Result{std::move(result), resultSortedOn(), LocalVocab{}};
+  }
+
+  std::vector<std::string> variableNames;
+  for ([[maybe_unused]] auto _ : ad_utility::integerRange(numColumns)) {
+    variableNames.emplace_back(readString(it, end));
+  }
+
+  // TODO<RobinTF> check if variable names do actually match expected names.
+
+  Id::T vocabMarker = Id::makeUndefined().getBits() + 0b10101010;
+  AD_CORRECTNESS_CHECK(Id::fromBits(vocabMarker).getDatatype() ==
+                       Datatype::Undefined);
+
+  LocalVocab vocab;
+  auto toId = [this, &prefixes, &vocab](Id::T bits) mutable {
+    // TODO<RobinTF> check local vocab for id conversion. Also the strings are
+    // transmitted after the ids, so we might need to search `result` for
+    // changes.
+    Id id = Id::fromBits(bits);
+    if (id.getDatatype() == Datatype::EncodedVal) {
+      // TODO<RobinTF> This is basically EncodedIriManager::toString copy
+      // pasted.
+      static constexpr auto mask =
+          ad_utility::bitMaskForLowerBits(EncodedIriManager::NumBitsEncoding);
+      auto digitEncoding = id.getEncodedVal() & mask;
+      // Get the index of the prefix.
+      auto prefixIdx = id.getEncodedVal() >> EncodedIriManager::NumBitsEncoding;
+      std::string result;
+      const auto& prefix = prefixes.at(prefixIdx);
+      result.reserve(prefix.size() + EncodedIriManager::NumDigits + 1);
+      result = prefix;
+      EncodedIriManager::decodeDecimalFrom64Bit(result, digitEncoding);
+      result.push_back('>');
+      return TripleComponent{
+          ad_utility::triple_component::Iri::fromStringRepresentation(
+              std::move(result))}
+          .toValueId(getIndex().getVocab(), vocab,
+                     getIndex().encodedIriManager());
+    }
+    // TODO<RobinTF> Add assertion that type is either trivial or local vocab
+    // index here.
+    return id;
+  };
+
+  // At which index we need to start converting values.
+  size_t dirtyIndex = 0;
+
+  while (it != end) {
+    auto firstValue = read<Id::T>(it, end);
+    if (firstValue == vocabMarker) {
+      std::vector<std::string> transmittedStrings;
+      std::string current;
+      while (!(current = readString(it, end)).empty()) {
+        transmittedStrings.emplace_back(std::move(current));
+      }
+
+      for (auto col : result.getColumns()) {
+        ql::ranges::for_each(
+            col.subspan(dirtyIndex),
+            [this, &vocab, &transmittedStrings](Id& id) {
+              if (id.getDatatype() == Datatype::LocalVocabIndex) {
+                id =
+                    TripleComponent{
+                        ad_utility::triple_component::Iri::fromIriref(
+                            transmittedStrings.at(reinterpret_cast<size_t>(
+                                id.getLocalVocabIndex())))}
+                        .toValueId(getIndex().getVocab(), vocab,
+                                   getIndex().encodedIriManager());
+              }
+            });
+      }
+
+      dirtyIndex = result.size();
+    } else {
+      result.emplace_back();
+      result.at(result.size() - 1, 0) = toId(firstValue);
+      for ([[maybe_unused]] auto colIndex : ql::views::iota(1u, numColumns)) {
+        result.at(result.size() - 1, colIndex) = toId(read<Id::T>(it, end));
+      }
+    }
+  }
+
+  return Result{std::move(result), resultSortedOn(), std::move(vocab)};
+}
+
 // ____________________________________________________________________________
 Result Service::computeResultImpl(bool requestLaziness) {
   // Get the URL of the SPARQL endpoint.
@@ -158,6 +311,7 @@ Result Service::computeResultImpl(bool requestLaziness) {
   HttpOrHttpsResponse response = getResultFunction_(
       serviceUrl, cancellationHandle_, boost::beast::http::verb::post,
       serviceQuery, "application/sparql-query",
+      "application/qlever-export+octet-stream, "
       "application/sparql-results+json");
 
   auto throwErrorWithContext = [this, &response](std::string_view sv) {
@@ -170,6 +324,10 @@ Result Service::computeResultImpl(bool requestLaziness) {
         "SERVICE responded with HTTP status code: ",
         static_cast<int>(response.status_), ", ",
         toStd(boost::beast::http::obsolete_reason(response.status_))));
+  }
+  if (ad_utility::utf8ToLower(response.contentType_)
+          .starts_with("application/qlever-export+octet-stream")) {
+    return computeBinaryResult(requestLaziness, std::move(response));
   }
   if (!ad_utility::utf8ToLower(response.contentType_)
            .starts_with("application/sparql-results+json")) {
