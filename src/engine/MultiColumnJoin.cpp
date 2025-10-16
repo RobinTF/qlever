@@ -8,8 +8,11 @@
 #include "engine/AddCombinedRowToTable.h"
 #include "engine/CallFixedSize.h"
 #include "engine/Engine.h"
+#include "engine/IndexScan.h"
 #include "engine/JoinHelpers.h"
 #include "util/JoinAlgorithms/JoinAlgorithms.h"
+#include "util/JoinAlgorithms/JoinColumnMapping.h"
+#include "util/Timer.h"
 
 using std::endl;
 using std::string;
@@ -62,14 +65,77 @@ string MultiColumnJoin::getDescriptor() const {
 Result MultiColumnJoin::computeResult([[maybe_unused]] bool requestLaziness) {
   AD_LOG_DEBUG << "MultiColumnJoin result computation..." << endl;
 
-  IdTable idTable{getExecutionContext()->getAllocator()};
-  idTable.setNumColumns(getResultWidth());
+  if (_left->knownEmptyResult() || _right->knownEmptyResult()) {
+    _left->getRootOperation()->updateRuntimeInformationWhenOptimizedOut();
+    _right->getRootOperation()->updateRuntimeInformationWhenOptimizedOut();
+    IdTable emptyTable{getResultWidth(), allocator()};
+    return {std::move(emptyTable), resultSortedOn(), LocalVocab{}};
+  }
 
-  AD_CONTRACT_CHECK(idTable.numColumns() >= _joinColumns.size());
+  // Check if exactly one of the children is an IndexScan
+  auto leftIndexScan =
+      std::dynamic_pointer_cast<IndexScan>(_left->getRootOperation());
+  auto rightIndexScan =
+      std::dynamic_pointer_cast<IndexScan>(_right->getRootOperation());
 
-  const auto leftResult = _left->getResult();
+  // If left is an IndexScan and right is not, evaluate right first
+  if (leftIndexScan && !rightIndexScan) {
+    auto rightResult = _right->getResult();
+    checkCancellation();
+
+    if (rightResult->isFullyMaterialized() && rightResult->idTable().empty()) {
+      _left->getRootOperation()->updateRuntimeInformationWhenOptimizedOut();
+      IdTable emptyTable{getResultWidth(), allocator()};
+      return {std::move(emptyTable), resultSortedOn(), LocalVocab{}};
+    }
+
+    // Apply optimization if right is fully materialized
+    if (rightResult->isFullyMaterialized()) {
+      return computeResultForIndexScanAndIdTable<true>(
+          requestLaziness, std::move(rightResult), leftIndexScan);
+    }
+
+    // If right is not fully materialized, fall through to standard join
+    auto leftResult = _left->getResult();
+    checkCancellation();
+
+    AD_LOG_DEBUG << "MultiColumnJoin subresult computation done." << std::endl;
+    AD_LOG_DEBUG << "Computing a multi column join between results of size "
+                 << leftResult->idTable().size() << " and "
+                 << rightResult->idTable().size() << endl;
+
+    IdTable idTable{getExecutionContext()->getAllocator()};
+    idTable.setNumColumns(getResultWidth());
+    AD_CONTRACT_CHECK(idTable.numColumns() >= _joinColumns.size());
+
+    computeMultiColumnJoin(leftResult->idTable(), rightResult->idTable(),
+                           _joinColumns, &idTable);
+    checkCancellation();
+
+    AD_LOG_DEBUG << "MultiColumnJoin result computation done" << endl;
+    return {std::move(idTable), resultSortedOn(),
+            Result::getMergedLocalVocab(*leftResult, *rightResult)};
+  }
+
+  // Get left result (either it's not an IndexScan, or right is an IndexScan)
+  auto leftResult = _left->getResult();
+  checkCancellation();
+
+  if (leftResult->isFullyMaterialized() && leftResult->idTable().empty()) {
+    _right->getRootOperation()->updateRuntimeInformationWhenOptimizedOut();
+    IdTable emptyTable{getResultWidth(), allocator()};
+    return {std::move(emptyTable), resultSortedOn(), LocalVocab{}};
+  }
+
+  // If right is an IndexScan and left is not, apply optimization if left is
+  // fully materialized
+  if (rightIndexScan && !leftIndexScan && leftResult->isFullyMaterialized()) {
+    return computeResultForIndexScanAndIdTable<false>(
+        requestLaziness, std::move(leftResult), rightIndexScan);
+  }
+
+  // Get right result for standard join
   const auto rightResult = _right->getResult();
-
   checkCancellation();
 
   AD_LOG_DEBUG << "MultiColumnJoin subresult computation done." << std::endl;
@@ -77,6 +143,11 @@ Result MultiColumnJoin::computeResult([[maybe_unused]] bool requestLaziness) {
   AD_LOG_DEBUG << "Computing a multi column join between results of size "
                << leftResult->idTable().size() << " and "
                << rightResult->idTable().size() << endl;
+
+  IdTable idTable{getExecutionContext()->getAllocator()};
+  idTable.setNumColumns(getResultWidth());
+
+  AD_CONTRACT_CHECK(idTable.numColumns() >= _joinColumns.size());
 
   computeMultiColumnJoin(leftResult->idTable(), rightResult->idTable(),
                          _joinColumns, &idTable);
@@ -307,3 +378,135 @@ bool MultiColumnJoin::columnOriginatesFromGraphOrUndef(
   }
   return Operation::columnOriginatesFromGraphOrUndef(variable);
 }
+
+// _____________________________________________________________________________
+ad_utility::AddCombinedRowToIdTable MultiColumnJoin::makeRowAdder(
+    std::function<void(IdTable&, LocalVocab&)> callback) const {
+  return ad_utility::AddCombinedRowToIdTable{
+      _joinColumns.size(),
+      IdTable{getResultWidth(), allocator()},
+      cancellationHandle_,
+      true,  // keepJoinColumn is always true for MultiColumnJoin
+      qlever::joinHelpers::CHUNK_SIZE,
+      std::move(callback)};
+}
+
+// _____________________________________________________________________________
+template <bool idTableIsRightInput>
+Result MultiColumnJoin::computeResultForIndexScanAndIdTable(
+    bool requestLaziness, std::shared_ptr<const Result> resultWithIdTable,
+    std::shared_ptr<IndexScan> scan) const {
+  using namespace qlever::joinHelpers;
+
+  // For multi-column joins, all join columns must be at the beginning after
+  // permutation (indices 0, 1, 2, ..., n-1 where n = number of join columns).
+  for (size_t i = 0; i < _joinColumns.size(); ++i) {
+    auto expectedCol = static_cast<ColumnIndex>(i);
+    auto actualCol =
+        idTableIsRightInput ? _joinColumns[i][1] : _joinColumns[i][0];
+    AD_CORRECTNESS_CHECK(actualCol == expectedCol);
+  }
+
+  ad_utility::JoinColumnMapping joinColMap{
+      _joinColumns, _left->getResultWidth(), _right->getResultWidth()};
+  auto resultPermutation = joinColMap.permutationResult();
+
+  auto action = [this, scan = std::move(scan),
+                 resultWithIdTable = std::move(resultWithIdTable),
+                 joinColMap = std::move(joinColMap)](
+                    std::function<void(IdTable&, LocalVocab&)> yieldTable) {
+    const IdTable& idTable = resultWithIdTable->idTable();
+    auto rowAdder = makeRowAdder(std::move(yieldTable));
+
+    // Create a permuted view containing all columns in the right order
+    auto permutedView = idTable.asColumnSubsetView(
+        idTableIsRightInput ? joinColMap.permutationRight()
+                            : joinColMap.permutationLeft());
+
+    // For block filtering (conservative, using only first column)
+    auto firstColForFiltering = ad_utility::IdTableAndFirstCol{
+        permutedView, resultWithIdTable->getCopyOfLocalVocab()};
+
+    ad_utility::Timer timer{ad_utility::timer::Timer::InitialStatus::Started};
+
+    // Check if any of the join columns have UNDEF values
+    bool idTableHasUndef = false;
+    if (!idTable.empty()) {
+      for (size_t i = 0; i < _joinColumns.size(); ++i) {
+        auto col =
+            idTableIsRightInput ? _joinColumns[i][1] : _joinColumns[i][0];
+        if (idTable.at(0, col).isUndefined()) {
+          idTableHasUndef = true;
+          break;
+        }
+      }
+    }
+
+    std::optional<std::shared_ptr<const Result>> indexScanResult = std::nullopt;
+
+    auto rightBlocks = [&scan, idTableHasUndef, &firstColForFiltering,
+                        &indexScanResult]()
+        -> std::variant<LazyInputView, GeneratorWithDetails> {
+      if (idTableHasUndef) {
+        indexScanResult =
+            scan->getResult(false, ComputationMode::LAZY_IF_SUPPORTED);
+        AD_CORRECTNESS_CHECK(!indexScanResult.value()->isFullyMaterialized());
+        return convertGenerator(indexScanResult.value()->idTables());
+      } else {
+        // Use the first column of the join for block filtering
+        // (conservative optimization for multi-column joins)
+        auto rightBlocksInternal =
+            scan->lazyScanForJoinOfColumnWithScan(firstColForFiltering.col());
+        return convertGenerator(std::move(rightBlocksInternal));
+      }
+    }();
+
+    runtimeInfo().addDetail("time-for-filtering-blocks", timer.msecs());
+
+    // For multi-column joins, we use std::less{} for conservative comparison
+    // on the first column only (block filtering), and let
+    // AddCombinedRowToIdTable verify all join columns match when adding rows
+    auto doJoin = [&rowAdder](auto& left, auto& right) mutable {
+      // Use std::less{} to compare only the first column (conservative for
+      // multi-column)
+      ad_utility::zipperJoinForBlocksWithPotentialUndef(left, right,
+                                                        std::less{}, rowAdder);
+    };
+
+    auto blockForIdTable = std::array{std::move(firstColForFiltering)};
+    std::visit(
+        [&doJoin, &blockForIdTable](auto& blocks) {
+          if constexpr (idTableIsRightInput) {
+            doJoin(blocks, blockForIdTable);
+          } else {
+            doJoin(blockForIdTable, blocks);
+          }
+        },
+        rightBlocks);
+
+    if (std::holds_alternative<GeneratorWithDetails>(rightBlocks)) {
+      scan->updateRuntimeInfoForLazyScan(
+          std::get<GeneratorWithDetails>(rightBlocks).details());
+    }
+
+    auto localVocab = std::move(rowAdder.localVocab());
+    return Result::IdTableVocabPair{std::move(rowAdder).resultTable(),
+                                    std::move(localVocab)};
+  };
+
+  if (requestLaziness) {
+    return {runLazyJoinAndConvertToGenerator(std::move(action),
+                                             std::move(resultPermutation)),
+            resultSortedOn()};
+  } else {
+    auto [idTable, localVocab] = action(ad_utility::noop);
+    applyPermutation(idTable, resultPermutation);
+    return {std::move(idTable), resultSortedOn(), std::move(localVocab)};
+  }
+}
+
+// Explicit template instantiations
+template Result MultiColumnJoin::computeResultForIndexScanAndIdTable<true>(
+    bool, std::shared_ptr<const Result>, std::shared_ptr<IndexScan>) const;
+template Result MultiColumnJoin::computeResultForIndexScanAndIdTable<false>(
+    bool, std::shared_ptr<const Result>, std::shared_ptr<IndexScan>) const;

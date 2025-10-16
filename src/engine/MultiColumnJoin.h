@@ -8,8 +8,11 @@
 #include <array>
 #include <vector>
 
+#include "engine/AddCombinedRowToTable.h"
 #include "engine/Operation.h"
 #include "engine/QueryExecutionTree.h"
+
+class IndexScan;
 
 class MultiColumnJoin : public Operation {
  private:
@@ -77,6 +80,18 @@ class MultiColumnJoin : public Operation {
   VariableToColumnMap computeVariableToColumnMap() const override;
 
   void computeSizeEstimateAndMultiplicities();
+
+  // Helper function to create the commonly used instance of AddCombinedRowToIdTable.
+  ad_utility::AddCombinedRowToIdTable makeRowAdder(
+      std::function<void(IdTable&, LocalVocab&)> callback) const;
+
+  // Special implementation for joining an IndexScan with a fully materialized
+  // IdTable. Similar to Join::computeResultForIndexScanAndIdTable but adapted
+  // for multiple join columns.
+  template <bool idTableIsRightInput>
+  Result computeResultForIndexScanAndIdTable(
+      bool requestLaziness, std::shared_ptr<const Result> resultWithIdTable,
+      std::shared_ptr<IndexScan> scan) const;
 };
 
 #endif  // QLEVER_SRC_ENGINE_MULTICOLUMNJOIN_H
