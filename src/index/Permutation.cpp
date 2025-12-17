@@ -21,11 +21,11 @@ Permutation::Permutation(Enum permutation, Allocator allocator)
 // _____________________________________________________________________
 CompressedRelationReader::ScanSpecAndBlocks Permutation::getScanSpecAndBlocks(
     const ScanSpecification& scanSpec,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
+    const LocatedTriplesPerBlock& locatedTriples) const {
   return {scanSpec,
           BlockMetadataRanges(
               getActualPermutation(scanSpec).getAugmentedMetadataForPermutation(
-                  locatedTriplesSnapshot))};
+                  locatedTriples))};
 }
 
 // _____________________________________________________________________
@@ -78,62 +78,55 @@ void Permutation::setOriginalMetadataForDeltaTriples(
 IdTable Permutation::scan(const ScanSpecAndBlocks& scanSpecAndBlocks,
                           ColumnIndicesRef additionalColumns,
                           const CancellationHandle& cancellationHandle,
-                          const LocatedTriplesSnapshot& locatedTriplesSnapshot,
+                          const LocatedTriplesPerBlock& locatedTriples,
                           const LimitOffsetClause& limitOffset) const {
   if (!isLoaded_) {
     throw std::runtime_error("This query requires the permutation " +
                              readableName_ + ", which was not loaded");
   }
   const auto& p = getActualPermutation(scanSpecAndBlocks.scanSpec_);
-  return p.reader().scan(
-      scanSpecAndBlocks, additionalColumns, cancellationHandle,
-      p.getLocatedTriplesForPermutation(locatedTriplesSnapshot), limitOffset);
+  return p.reader().scan(scanSpecAndBlocks, additionalColumns,
+                         cancellationHandle, locatedTriples, limitOffset);
 }
 
 // _____________________________________________________________________
 size_t Permutation::getResultSizeOfScan(
     const ScanSpecAndBlocks& scanSpecAndBlocks,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
+    const LocatedTriplesPerBlock& locatedTriples) const {
   const auto& p = getActualPermutation(scanSpecAndBlocks.scanSpec_);
-  return p.reader().getResultSizeOfScan(
-      scanSpecAndBlocks,
-      p.getLocatedTriplesForPermutation(locatedTriplesSnapshot));
+  return p.reader().getResultSizeOfScan(scanSpecAndBlocks, locatedTriples);
 }
 
 // _____________________________________________________________________
 std::pair<size_t, size_t> Permutation::getSizeEstimateForScan(
     const ScanSpecAndBlocks& scanSpecAndBlocks,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
+    const LocatedTriplesPerBlock& locatedTriples) const {
   const auto& p = getActualPermutation(scanSpecAndBlocks.scanSpec_);
-  return p.reader().getSizeEstimateForScan(
-      scanSpecAndBlocks,
-      p.getLocatedTriplesForPermutation(locatedTriplesSnapshot));
+  return p.reader().getSizeEstimateForScan(scanSpecAndBlocks, locatedTriples);
 }
 
 // ____________________________________________________________________________
 IdTable Permutation::getDistinctCol1IdsAndCounts(
     Id col0Id, const CancellationHandle& cancellationHandle,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot,
+    const LocatedTriplesPerBlock& locatedTriples,
     const LimitOffsetClause& limitOffset) const {
   const auto& p = getActualPermutation(col0Id);
   return p.reader().getDistinctCol1IdsAndCounts(
       getScanSpecAndBlocks(
           ScanSpecification{col0Id, std::nullopt, std::nullopt},
-          locatedTriplesSnapshot),
-      cancellationHandle,
-      p.getLocatedTriplesForPermutation(locatedTriplesSnapshot), limitOffset);
+          locatedTriples),
+      cancellationHandle, locatedTriples, limitOffset);
 }
 
 // ____________________________________________________________________________
 IdTable Permutation::getDistinctCol0IdsAndCounts(
     const CancellationHandle& cancellationHandle,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot,
+    const LocatedTriplesPerBlock& locatedTriples,
     const LimitOffsetClause& limitOffset) const {
   ScanSpecification scanSpec{std::nullopt, std::nullopt, std::nullopt};
   return reader().getDistinctCol0IdsAndCounts(
-      getScanSpecAndBlocks(scanSpec, locatedTriplesSnapshot),
-      cancellationHandle,
-      getLocatedTriplesForPermutation(locatedTriplesSnapshot), limitOffset);
+      getScanSpecAndBlocks(scanSpec, locatedTriples), cancellationHandle,
+      locatedTriples, limitOffset);
 }
 
 // _____________________________________________________________________
@@ -178,7 +171,7 @@ std::string_view Permutation::toString(Permutation::Enum permutation) {
 
 // _____________________________________________________________________
 std::optional<CompressedRelationMetadata> Permutation::getMetadata(
-    Id col0Id, const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
+    Id col0Id, const LocatedTriplesPerBlock& locatedTriples) const {
   const auto& p = getActualPermutation(col0Id);
   if (p.meta_.col0IdExists(col0Id)) {
     return p.meta_.getMetaData(col0Id);
@@ -186,18 +179,17 @@ std::optional<CompressedRelationMetadata> Permutation::getMetadata(
   return p.reader().getMetadataForSmallRelation(
       getScanSpecAndBlocks(
           ScanSpecification{col0Id, std::nullopt, std::nullopt},
-          locatedTriplesSnapshot),
-      col0Id, p.getLocatedTriplesForPermutation(locatedTriplesSnapshot));
+          locatedTriples),
+      col0Id, locatedTriples);
 }
 
 // _____________________________________________________________________
 std::optional<Permutation::MetadataAndBlocks> Permutation::getMetadataAndBlocks(
     const ScanSpecAndBlocks& scanSpecAndBlocks,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
+    const LocatedTriplesPerBlock& locatedTriples) const {
   const auto& p = getActualPermutation(scanSpecAndBlocks.scanSpec_);
   auto firstAndLastTriple = p.reader().getFirstAndLastTripleIgnoringGraph(
-      scanSpecAndBlocks,
-      p.getLocatedTriplesForPermutation(locatedTriplesSnapshot));
+      scanSpecAndBlocks, locatedTriples);
   if (!firstAndLastTriple.has_value()) {
     return std::nullopt;
   }
@@ -211,7 +203,7 @@ CompressedRelationReader::IdTableGeneratorInputRange Permutation::lazyScan(
     std::optional<std::vector<CompressedBlockMetadata>> optBlocks,
     ColumnIndicesRef additionalColumns,
     const CancellationHandle& cancellationHandle,
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot,
+    const LocatedTriplesPerBlock& locatedTriples,
     const LimitOffsetClause& limitOffset) const {
   const auto& p = getActualPermutation(scanSpecAndBlocks.scanSpec_);
   ColumnIndices columns{additionalColumns.begin(), additionalColumns.end()};
@@ -219,10 +211,9 @@ CompressedRelationReader::IdTableGeneratorInputRange Permutation::lazyScan(
     optBlocks = CompressedRelationReader::convertBlockMetadataRangesToVector(
         scanSpecAndBlocks.blockMetadata_);
   }
-  return p.reader().lazyScan(
-      scanSpecAndBlocks.scanSpec_, std::move(optBlocks.value()),
-      std::move(columns), cancellationHandle,
-      p.getLocatedTriplesForPermutation(locatedTriplesSnapshot), limitOffset);
+  return p.reader().lazyScan(scanSpecAndBlocks.scanSpec_,
+                             std::move(optBlocks.value()), std::move(columns),
+                             cancellationHandle, locatedTriples, limitOffset);
 }
 
 // ______________________________________________________________________
@@ -263,10 +254,8 @@ const LocatedTriplesPerBlock& Permutation::getLocatedTriplesForPermutation(
 
 // ______________________________________________________________________
 BlockMetadataRanges Permutation::getAugmentedMetadataForPermutation(
-    const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
-  BlockMetadataSpan blocks(
-      getLocatedTriplesForPermutation(locatedTriplesSnapshot)
-          .getAugmentedMetadata());
+    const LocatedTriplesPerBlock& locatedTriples) const {
+  BlockMetadataSpan blocks(locatedTriples.getAugmentedMetadata());
   return {{blocks.begin(), blocks.end()}};
 }
 

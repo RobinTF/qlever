@@ -269,7 +269,8 @@ Result HasPredicateScan::computeResult([[maybe_unused]] bool requestLaziness) {
           std::nullopt}
           .toScanSpecification(index);
   const auto& perm = index.getPermutation(Permutation::Enum::PSO);
-  const auto& locatedTriple = locatedTriplesSnapshot();
+  const auto& locatedTriple =
+      perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
   auto hasPattern =
       perm.lazyScan(perm.getScanSpecAndBlocks(scanSpec, locatedTriple),
                     std::nullopt, {}, cancellationHandle_, locatedTriple);
@@ -345,7 +346,8 @@ void HasPredicateScan::computeFreeO(
           std::nullopt}
           .toScanSpecification(index);
   const auto& perm = index.getPermutation(Permutation::Enum::PSO);
-  const auto& locatedTriple = locatedTriplesSnapshot();
+  const auto& locatedTriple =
+      perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
   auto hasPattern =
       perm.scan(perm.getScanSpecAndBlocks(scanSpec, locatedTriple), {},
                 cancellationHandle_, locatedTriple);
