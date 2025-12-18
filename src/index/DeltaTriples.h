@@ -60,7 +60,8 @@ class SharedLocatedTriplesSnapshot
   }
   std::shared_ptr<const LocatedTriplesPerBlock>
   getInternalLocatedTriplesForPermutation(Permutation::Enum permutation) const {
-    return {*this, &this->get()->getInternalLocatedTriplesForPermutation(permutation)};
+    return {*this,
+            &this->get()->getInternalLocatedTriplesForPermutation(permutation)};
   }
 };
 
