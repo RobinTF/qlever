@@ -1585,7 +1585,8 @@ size_t IndexImpl::getCardinality(
     const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
   const auto& perm = getPermutation(permutation);
   if (const auto& meta = perm.getMetadata(
-          id, perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot));
+          id, perm.getActualPermutation(id).getLocatedTriplesForPermutation(
+                  locatedTriplesSnapshot));
       meta.has_value()) {
     return meta.value().numRows_;
   }
@@ -1636,7 +1637,8 @@ std::vector<float> IndexImpl::getMultiplicities(
   if (auto keyId = key.toValueId(getVocab(), encodedIriManager())) {
     auto meta = permutation.getMetadata(
         keyId.value(),
-        permutation.getLocatedTriplesForPermutation(locatedTriplesSnapshot));
+        permutation.getActualPermutation(keyId.value())
+            .getLocatedTriplesForPermutation(locatedTriplesSnapshot));
     if (meta.has_value()) {
       return {meta.value().getCol1Multiplicity(),
               meta.value().getCol2Multiplicity()};
@@ -1677,7 +1679,8 @@ IdTable IndexImpl::scan(
     const LimitOffsetClause& limitOffset) const {
   const auto& perm = getPermutation(p);
   const auto& locatedTriples =
-      perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot);
+      perm.getActualPermutation(scanSpecification)
+          .getLocatedTriplesForPermutation(locatedTriplesSnapshot);
   return perm.scan(perm.getScanSpecAndBlocks(scanSpecification, locatedTriples),
                    additionalColumns, cancellationHandle, locatedTriples,
                    limitOffset);
@@ -1690,7 +1693,8 @@ size_t IndexImpl::getResultSizeOfScan(
     const LocatedTriplesSnapshot& locatedTriplesSnapshot) const {
   const auto& perm = getPermutation(permutation);
   const auto& locatedTriples =
-      perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot);
+      perm.getActualPermutation(scanSpecification)
+          .getLocatedTriplesForPermutation(locatedTriplesSnapshot);
   return perm.getResultSizeOfScan(
       perm.getScanSpecAndBlocks(scanSpecification, locatedTriples),
       locatedTriples);
