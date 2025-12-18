@@ -39,7 +39,9 @@ static constexpr auto makeJoin =
   auto p = IndexScan::getPermutationForTriple(Permutation::Enum::PSO,
                                               qec->getIndex(), triple);
   auto hasPatternScan = ad_utility::makeExecutionTree<IndexScan>(
-      qec, p, p->getLocatedTriplesForPermutation(qec->sharedLocatedTriplesSnapshot()), triple);
+      qec, p,
+      p->getLocatedTriplesForPermutation(qec->sharedLocatedTriplesSnapshot()),
+      triple);
   auto joinedSubtree = ad_utility::makeExecutionTree<Join>(
       qec, std::move(subtree), std::move(hasPatternScan), subtreeColIndex, 0);
   auto column =
