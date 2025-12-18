@@ -38,10 +38,10 @@ static constexpr auto makeJoin =
       objectVariable};
   auto p = IndexScan::getPermutationForTriple(Permutation::Enum::PSO,
                                               qec->getIndex(), triple);
-  auto hasPatternScan = ad_utility::makeExecutionTree<IndexScan>(
-      qec, p,
-      p->getLocatedTriplesForPermutation(qec->sharedLocatedTriplesSnapshot()),
-      triple);
+  auto ltpb = IndexScan::getLocatedTriplesPerBlockForTriple(
+      Permutation::Enum::PSO, qec->sharedLocatedTriplesSnapshot(), triple);
+  auto hasPatternScan =
+      ad_utility::makeExecutionTree<IndexScan>(qec, p, ltpb, triple);
   auto joinedSubtree = ad_utility::makeExecutionTree<Join>(
       qec, std::move(subtree), std::move(hasPatternScan), subtreeColIndex, 0);
   auto column =

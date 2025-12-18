@@ -301,6 +301,11 @@ class IndexScan final : public Operation {
   static std::shared_ptr<const Permutation> getPermutationForTriple(
       Permutation::Enum permutation, const Index& index,
       const SparqlTripleSimple& triple);
+
+  static std::shared_ptr<const LocatedTriplesPerBlock>
+  getLocatedTriplesPerBlockForTriple(Permutation::Enum permutation,
+                                     LocatedTriplesSnapshotPtr snapshot,
+                                     const SparqlTripleSimple& triple);
 };
 
 #endif  // QLEVER_SRC_ENGINE_INDEXSCAN_H
