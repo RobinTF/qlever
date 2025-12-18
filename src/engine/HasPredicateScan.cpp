@@ -32,12 +32,15 @@ static constexpr auto makeJoin =
     -> HasPredicateScan::SubtreeAndColumnIndex {
   const auto& subtreeVar =
       subtree->getVariableAndInfoByColumnIndex(subtreeColIndex).first;
+  SparqlTripleSimple triple{
+      subtreeVar,
+      ad_utility::triple_component::Iri::fromIriref(HAS_PATTERN_PREDICATE),
+      objectVariable};
   auto hasPatternScan = ad_utility::makeExecutionTree<IndexScan>(
-      qec, Permutation::Enum::PSO,
-      SparqlTripleSimple{
-          subtreeVar,
-          ad_utility::triple_component::Iri::fromIriref(HAS_PATTERN_PREDICATE),
-          objectVariable});
+      qec,
+      IndexScan::getPermutationForTriple(Permutation::Enum::PSO,
+                                         qec->getIndex(), triple),
+      qec->sharedLocatedTriplesSnapshot(), triple);
   auto joinedSubtree = ad_utility::makeExecutionTree<Join>(
       qec, std::move(subtree), std::move(hasPatternScan), subtreeColIndex, 0);
   auto column =
@@ -268,10 +271,9 @@ Result HasPredicateScan::computeResult([[maybe_unused]] bool requestLaziness) {
           TripleComponent::Iri::fromIriref(HAS_PATTERN_PREDICATE), std::nullopt,
           std::nullopt}
           .toScanSpecification(index);
-  const auto& perm = index.getPermutation(Permutation::Enum::PSO);
-  const auto& locatedTriple =
-      perm.getActualPermutation(scanSpec).getLocatedTriplesForPermutation(
-          locatedTriplesSnapshot());
+  const auto& perm =
+      index.getPermutation(Permutation::Enum::PSO).internalPermutation();
+  const auto& locatedTriple = perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
   auto hasPattern =
       perm.lazyScan(perm.getScanSpecAndBlocks(scanSpec, locatedTriple),
                     std::nullopt, {}, cancellationHandle_, locatedTriple);
@@ -346,10 +348,9 @@ void HasPredicateScan::computeFreeO(
           TripleComponent::Iri::fromIriref(HAS_PATTERN_PREDICATE), subjectAsId,
           std::nullopt}
           .toScanSpecification(index);
-  const auto& perm = index.getPermutation(Permutation::Enum::PSO);
-  const auto& locatedTriple =
-      perm.getActualPermutation(scanSpec).getLocatedTriplesForPermutation(
-          locatedTriplesSnapshot());
+  const auto& perm =
+      index.getPermutation(Permutation::Enum::PSO).internalPermutation();
+  const auto& locatedTriple = perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
   auto hasPattern =
       perm.scan(perm.getScanSpecAndBlocks(scanSpec, locatedTriple), {},
                 cancellationHandle_, locatedTriple);
