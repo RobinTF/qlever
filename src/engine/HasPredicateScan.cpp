@@ -36,11 +36,10 @@ static constexpr auto makeJoin =
       subtreeVar,
       ad_utility::triple_component::Iri::fromIriref(HAS_PATTERN_PREDICATE),
       objectVariable};
+  auto p = IndexScan::getPermutationForTriple(Permutation::Enum::PSO,
+                                              qec->getIndex(), triple);
   auto hasPatternScan = ad_utility::makeExecutionTree<IndexScan>(
-      qec,
-      IndexScan::getPermutationForTriple(Permutation::Enum::PSO,
-                                         qec->getIndex(), triple),
-      qec->sharedLocatedTriplesSnapshot(), triple);
+      qec, p, p->getLocatedTriplesForPermutation(qec->sharedLocatedTriplesSnapshot()), triple);
   auto joinedSubtree = ad_utility::makeExecutionTree<Join>(
       qec, std::move(subtree), std::move(hasPatternScan), subtreeColIndex, 0);
   auto column =
@@ -273,7 +272,8 @@ Result HasPredicateScan::computeResult([[maybe_unused]] bool requestLaziness) {
           .toScanSpecification(index);
   const auto& perm =
       index.getPermutation(Permutation::Enum::PSO).internalPermutation();
-  const auto& locatedTriple = perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
+  const auto& locatedTriple =
+      perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
   auto hasPattern =
       perm.lazyScan(perm.getScanSpecAndBlocks(scanSpec, locatedTriple),
                     std::nullopt, {}, cancellationHandle_, locatedTriple);
@@ -350,7 +350,8 @@ void HasPredicateScan::computeFreeO(
           .toScanSpecification(index);
   const auto& perm =
       index.getPermutation(Permutation::Enum::PSO).internalPermutation();
-  const auto& locatedTriple = perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
+  const auto& locatedTriple =
+      perm.getLocatedTriplesForPermutation(locatedTriplesSnapshot());
   auto hasPattern =
       perm.scan(perm.getScanSpecAndBlocks(scanSpec, locatedTriple), {},
                 cancellationHandle_, locatedTriple);
