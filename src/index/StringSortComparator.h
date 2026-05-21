@@ -677,6 +677,22 @@ class TripleComponentComparator {
   [[nodiscard]] int compare(const SplitValBase<A, B, C>& a,
                             const SplitValBase<A, B, C>& b,
                             const Level level) const {
+    // When the inner value is a precomputed ICU `SortKey`, byte-comparing the
+    // sort keys is only guaranteed to match `compareUTF8` at the PRIMARY
+    // level. With `UCOL_SHIFTED` alternate handling (the production locale
+    // setting), the two paths disagree at higher levels for strings whose
+    // distinguishing codepoint sits behind a variable-shifted symbol (see
+    // the `TripleComponentComparatorTotalKhmer` regression test). For
+    // non-PRIMARY levels we therefore re-split `fullInput_` and route the
+    // comparison through `compareUTF8`.
+    if constexpr (std::is_same_v<A, LocaleManager::SortKey>) {
+      if (level != Level::PRIMARY) {
+        auto splitA = extractComparable<SplitValNonOwning>(a.fullInput_, level);
+        auto splitB = extractComparable<SplitValNonOwning>(b.fullInput_, level);
+        return compare(splitA, splitB, level);
+      }
+    }
+
     if (auto res =
             std::strncmp(&a.firstOriginalChar_, &b.firstOriginalChar_, 1);
         res != 0) {

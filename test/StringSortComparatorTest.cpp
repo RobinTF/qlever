@@ -189,6 +189,48 @@ TEST(StringSortComparatorTest, TripleComponentComparatorTotal) {
 }
 
 // ______________________________________________________________________________________________
+// Regression test for two literals that differ only in a single Khmer
+// combining mark attached to a dotted circle (U+25CC):
+//   "Category:Khmer terms spelled with ◌៊"@en  (U+17CA KHMER SIGN TRIISAP)
+//   "Category:Khmer terms spelled with ◌៍"@en  (U+17CD KHMER SIGN TOANDAKHIAT)
+// The result must be identical regardless of whether the literals are compared
+// directly via `operator()` or by first computing their `SplitVal` sort keys.
+//
+// Uses `ignorePunctuationAtFirstLevel = true` (production setting). With
+// `UCOL_ALTERNATE_HANDLING = UCOL_SHIFTED` + `setMaxVariable(SYMBOL)`, ICU's
+// `compareUTF8` and byte-comparing ICU sort keys would otherwise return
+// opposite orderings for this pair, because the distinguishing codepoint
+// sits behind a variable-shifted symbol (U+25CC). `compare(SplitVal,
+// SplitVal, level)` works around this for non-PRIMARY levels by re-splitting
+// `fullInput_` and routing through `compareUTF8`.
+TEST(StringSortComparatorTest, TripleComponentComparatorTotalKhmer) {
+  TripleComponentComparator comparator("en", "US", true);
+  using L = TripleComponentComparator::Level;
+
+  std::string_view a = "\"Category:Khmer terms spelled with ◌៊\"@en";
+  std::string_view b = "\"Category:Khmer terms spelled with ◌៍\"@en";
+
+  bool directAB = comparator(a, b, L::TOTAL);
+  bool directBA = comparator(b, a, L::TOTAL);
+
+  auto aSplit = comparator.extractAndTransformComparable(a, L::TOTAL);
+  auto bSplit = comparator.extractAndTransformComparable(b, L::TOTAL);
+
+  EXPECT_EQ(directAB, comparator(aSplit, bSplit, L::TOTAL));
+  EXPECT_EQ(directBA, comparator(bSplit, aSplit, L::TOTAL));
+
+  // The two mixed variants must agree as well.
+  EXPECT_EQ(directAB, comparator(a, bSplit, L::TOTAL));
+  EXPECT_EQ(directAB, comparator(aSplit, b, L::TOTAL));
+  EXPECT_EQ(directBA, comparator(b, aSplit, L::TOTAL));
+  EXPECT_EQ(directBA, comparator(bSplit, a, L::TOTAL));
+
+  // A total ordering is irreflexive and antisymmetric: the two strings differ,
+  // so exactly one of `directAB` / `directBA` must be true.
+  EXPECT_NE(directAB, directBA);
+}
+
+// ______________________________________________________________________________________________
 TEST(StringSortComparatorTest, IsLessInTotalWithExternalFlag) {
   TripleComponentComparator comp("en", "US", false);
 
