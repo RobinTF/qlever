@@ -41,6 +41,8 @@
 #include "util/File.h"
 #include "util/Forward.h"
 #include "util/MemorySize/MemorySize.h"
+#include "util/Serializer/CompressedSerializer.h"
+#include "util/Serializer/FileSerializer.h"
 #include "util/json.h"
 
 template <typename Comparator, size_t I = NumColumnsIndexBuilding>
@@ -53,21 +55,16 @@ using FirstPermutationSorter = ExternalSorter<FirstPermutation>;
 using SecondPermutation = SortByOSP;
 using ThirdPermutation = SortByPSO;
 
-// Return type of `IndexImpl::buildPartialVocabularies`.
-struct BuildPartialVocabulariesResult {
-  using TripleVec =
-      ad_utility::CompressedExternalIdTable<NumColumnsIndexBuilding>;
+// Data produced after parsing: vocabulary metadata and the sizes of the partial
+// vocabularies. The ID triples themselves are written to disk (to the
+// `UNSORTED_IDS_SUFFIX` file) and read back by
+// `IndexImpl::convertPartialToGlobalIds`.
+struct IndexBuilderDataAsExternalVector {
+  ad_utility::vocabulary_merger::VocabularyMetaData vocabularyMetaData_;
   // The i-th entry is the actual number of triples of the i-th batch, which
   // belongs to the i-th partial vocabulary. It might be slightly different
   // from the specified `batchSize` because of internally added triples.
   std::vector<size_t> numTriplesPerPartialVocab_;
-  std::unique_ptr<TripleVec> idTriples_;
-};
-
-// Data produced after parsing: vocabulary metadata and unsorted ID triples.
-struct IndexBuilderDataAsExternalVector {
-  ad_utility::vocabulary_merger::VocabularyMetaData vocabularyMetaData_;
-  BuildPartialVocabulariesResult parsedTriples_;
 };
 
 // Store the "normal" triples sorted by the first permutation, together with
@@ -89,8 +86,6 @@ struct IndexBuilderDataAsFirstPermutationSorter {
 class IndexImpl {
  public:
   using TextScoringMetric = qlever::TextScoringMetric;
-  using TripleVec =
-      ad_utility::CompressedExternalIdTable<NumColumnsIndexBuilding>;
   // Block Id, isEntity, Context Id, Word Id, Score
   using TextVec = ad_utility::CompressedExternalIdTableSorter<SortText, 5>;
 
@@ -504,19 +499,19 @@ class IndexImpl {
  protected:
   // Private member functions
 
-  // Create Vocabulary and directly write it to disk. Create TripleVec with all
-  // the triples converted to id space. This Vec can be used for creating
-  // permutations. Member vocab_ will be empty after this because it is not
-  // needed for index creation once the TripleVec is set up and it would be a
-  // waste of RAM.
+  // Create Vocabulary and directly write it to disk. Write all the triples
+  // converted to id space to disk, sorted into the first permutation, so that
+  // they can be used for creating the permutations. Member vocab_ will be empty
+  // after this because it is not needed for index creation once the triples are
+  // set up and it would be a waste of RAM.
   IndexBuilderDataAsFirstPermutationSorter createIdTriplesAndVocab(
       std::shared_ptr<RdfParserBase> parser);
 
   // Parse all triples from `parser` in batches of `linesPerPartial`, write one
-  // partial vocabulary file per batch, and return the accumulated ID triples
-  // together with per-batch size information. The memory used by the item
-  // allocator is freed when this function returns.
-  BuildPartialVocabulariesResult buildPartialVocabularies(
+  // partial vocabulary file per batch, write the ID triples to disk (to the
+  // `UNSORTED_IDS_SUFFIX` file), and return the number of triples per batch.
+  // The memory used by the item allocator is freed when this function returns.
+  std::vector<size_t> buildPartialVocabularies(
       std::shared_ptr<RdfParserBase> parser, size_t linesPerPartial);
 
   // ___________________________________________________________________
@@ -541,7 +536,8 @@ class IndexImpl {
       size_t numLines, size_t numFiles, size_t actualCurrentPartialSize,
       std::unique_ptr<ItemMapArray> items,
       std::vector<std::array<Id, NumColumnsIndexBuilding>> localIds,
-      ad_utility::Synchronized<std::unique_ptr<TripleVec>>* globalWritePtr);
+      ad_utility::Synchronized<ad_utility::serialization::ZstdWriteSerializer<
+          ad_utility::serialization::FileWriteSerializer>>* globalWritePtr);
 
   // Return a Turtle parser that parses the given file. The parser will be
   // configured to either parse in parallel or not, and to either use the
@@ -550,10 +546,15 @@ class IndexImpl {
   std::unique_ptr<RdfParserBase> makeRdfParser(
       const std::vector<Index::InputFileSpecification>& files) const;
 
+  // Read the unsorted ID triples (written by `buildPartialVocabularies` to the
+  // `UNSORTED_IDS_SUFFIX` file, batch by batch, one batch per partial
+  // vocabulary) back from disk, convert their partial to global IDs using the
+  // corresponding partial-vocabulary mappings, and feed them into the sorter
+  // for the first permutation. `numPartialVocabularies` is the number of
+  // batches that were written.
   template <typename Func>
   FirstPermutationSorterAndInternalTriplesAsPso convertPartialToGlobalIds(
-      TripleVec& data, const std::vector<size_t>& actualLinesPerPartial,
-      Func isQLeverInternalTriple);
+      size_t numPartialVocabularies, Func isQLeverInternalTriple);
 
   // Helper function to get the filename for a given permutation.
   std::string getFilenameForPermutation(const Permutation& permutation,

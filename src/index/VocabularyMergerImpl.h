@@ -20,8 +20,11 @@
 #include "util/ParallelMultiwayMerge.h"
 #include "util/ProgressBar.h"
 #include "util/Serializer/ByteBufferSerializer.h"
+#include "util/Serializer/CompressedSerializer.h"
 #include "util/Serializer/FileSerializer.h"
+#include "util/Serializer/SerializeArrayOrTuple.h"
 #include "util/Serializer/SerializeString.h"
+#include "util/Serializer/SerializeVector.h"
 #include "util/Timer.h"
 
 namespace ad_utility::vocabulary_merger {
@@ -183,29 +186,27 @@ inline HashMap<uint64_t, uint64_t> createInternalMapping(ItemVec& els) {
 
 // ________________________________________________________________________________________________________
 inline void writeMappedIdsToExtVec(
-    const std::vector<std::array<Id, NumColumnsIndexBuilding>>& input,
+    std::vector<std::array<Id, NumColumnsIndexBuilding>> input,
     const HashMap<uint64_t, uint64_t>& map,
-    std::unique_ptr<TripleVec>* writePtr) {
-  auto& vec = *(*writePtr);
-  for (const auto& curTriple : input) {
-    std::array<Id, NumColumnsIndexBuilding> mappedTriple;
-    // for all triple elements find their mapping from partial to global ids
-    for (size_t k = 0; k < NumColumnsIndexBuilding; ++k) {
-      if (curTriple[k].getDatatype() != Datatype::VocabIndex) {
-        mappedTriple[k] = curTriple[k];
+    ad_utility::serialization::ZstdWriteSerializer<
+        ad_utility::serialization::FileWriteSerializer>* writePtr) {
+  for (auto& curTriple : input) {
+    for (Id& id : curTriple) {
+      if (id.getDatatype() != Datatype::VocabIndex) {
         continue;
       }
-      auto iterator = map.find(curTriple[k].getVocabIndex().get());
-      if (iterator == map.end()) {
-        AD_LOG_ERROR << "not found in partial local vocabulary: "
-                     << curTriple[k] << std::endl;
-        AD_FAIL();
-      }
-      mappedTriple[k] =
-          Id::makeFromVocabIndex(VocabIndex::make(iterator->second));
+      // for all triple elements find their mapping from partial to global ids
+      auto iterator = map.find(id.getVocabIndex().get());
+      AD_CORRECTNESS_CHECK(iterator != map.end(), "VocabIndex ",
+                           id.getVocabIndex().get(),
+                           " not found in mapping for partial vocabulary");
+      id = Id::makeFromVocabIndex(VocabIndex::make(iterator->second));
     }
-    vec.push(mappedTriple);
   }
+  // Serialize the whole batch as a single vector. This prepends the number of
+  // triples, so that the reader can read back exactly this batch without any
+  // external bookkeeping (see `IndexImpl::convertPartialToGlobalIds`).
+  (*writePtr) << input;
 }
 
 // _________________________________________________________________________________________________________
