@@ -237,113 +237,49 @@ TEST(CompressedExternalIdTable, sorterMemoryLimit) {
       ::testing::ContainsRegex("Insufficient memory"));
 }
 
-// Test corner case: pushing exactly blockSize rows leaves currentBlock_ empty.
-TEST(CompressedExternalIdTable, cornerCasesEmptyBlocks) {
-  // Create `CompressedExternalIdTable` with a block size of exactly 10 rows.
-  size_t blockSize = 10;
-  std::string filename = "idTableCompressedSorter.cornerCases.dat";
-  ad_utility::EXTERNAL_ID_TABLE_SORTER_IGNORE_MEMORY_LIMIT_FOR_TESTING = true;
-  size_t blockMemory = blockSize * NUM_COLS * sizeof(Id) * 2;
-  ad_utility::CompressedExternalIdTable<0> writer{
-      filename, NUM_COLS, ad_utility::MemorySize::bytes(blockMemory),
-      ad_utility::testing::makeAllocator()};
-
-  // Push exactly 10 rows. After the 10th row, one full block is written and
-  // `currentBlock_` becomes empty. When `getRows()` is later called, it will
-  // call `pushBlock()` with this empty block, which must be handled correctly
-  // (the empty block is detected and skipped, and a dummy future is created to
-  // maintain invariants). This corner case failed in an earlier version.
-  CopyableIdTable<0> randomTable =
-      createRandomlyFilledIdTable(blockSize, NUM_COLS);
-  for (const auto& row : randomTable) {
-    writer.push(row);
-  }
-
-  // Check that no failure occurs and the result is as expected.
-  auto generator = writer.getRows();
-  auto result = idTableFromRowGenerator<0>(generator, NUM_COLS);
-  EXPECT_EQ(result.size(), randomTable.size());
-}
-
-template <size_t NumStaticColumns>
-void testExternalCompressor(size_t numDynamicColumns, size_t numRows,
-                            ad_utility::MemorySize memoryToUse) {
-  std::string filename = "idTableCompressedSorter.testExternalCompressor.dat";
-  using namespace ad_utility::memory_literals;
-
-  ad_utility::EXTERNAL_ID_TABLE_SORTER_IGNORE_MEMORY_LIMIT_FOR_TESTING = true;
-  ad_utility::CompressedExternalIdTable<NumStaticColumns> writer{
-      filename, numDynamicColumns, memoryToUse,
-      ad_utility::testing::makeAllocator(), 5_kB};
-
-  for (size_t i = 0; i < 2; ++i) {
-    CopyableIdTable<NumStaticColumns> randomTable =
-        createRandomlyFilledIdTable(numRows, numDynamicColumns)
-            .toStatic<NumStaticColumns>();
-
-    for (const auto& row : randomTable) {
-      writer.push(row);
-    }
-
-    auto generator = writer.getRows();
-
-    using namespace ::testing;
-    auto result =
-        idTableFromRowGenerator<NumStaticColumns>(generator, numDynamicColumns);
-    ASSERT_THAT(result, Eq(randomTable));
-    writer.clear();
-  }
-}
-
-TEST(CompressedExternalIdTable, compressorRandomInput) {
-  using namespace ad_utility::memory_literals;
-  // Test for dynamic (<0>) and static(<3>) tables.
-  // Test the case that there are multiple blocks to merge (many rows but a low
-  // memory limit), but also the case that there is only a single block (few
-  // rows with a sufficiently large memory limit).
-  testExternalCompressor<0>(3, 10'000, 10_kB);
-  testExternalCompressor<0>(3, 1000, 1_MB);
-  testExternalCompressor<3>(3, 10'000, 10_kB);
-  testExternalCompressor<3>(3, 1000, 1_MB);
-}
-
+// While a generator obtained from a `CompressedExternalIdTableWriter` has not
+// been fully consumed, the writer is considered to be "iterated over", so
+// calling `writeIdTable` or `clear` must throw. Once all generators have been
+// fully consumed, both work again. This used to be covered (transitively, via
+// `getRows()`) by the now-removed `CompressedExternalIdTable` class.
 TEST(CompressedExternalIdTable, exceptionsWhenWritingWhileIterating) {
   std::string filename = "idTableCompressor.exceptionsWhenWritingTest.dat";
   using namespace ad_utility::memory_literals;
 
-  ad_utility::CompressedExternalIdTable<3> writer{
-      filename, 3, 10_B, ad_utility::testing::makeAllocator()};
+  // A small block size so that the written table is split into multiple blocks.
+  ad_utility::CompressedExternalIdTableWriter writer{
+      filename, 3, ad_utility::testing::makeAllocator(), 10_B};
 
-  CopyableIdTable<3> randomTable =
-      createRandomlyFilledIdTable(1000, 3).toStatic<3>();
+  auto table = makeIdTableFromVector({{2, 4, 7}, {3, 6, 8}, {4, 3, 2}});
+  writer.writeIdTable(table);
 
-  auto pushAll = [&randomTable, &writer] {
-    for (const auto& row : randomTable) {
-      writer.push(row);
-    }
-  };
-  ASSERT_NO_THROW(pushAll());
-
-  auto generator = writer.getRows();
-  // We have obtained a generator, but have not yet started it, but pushing is
-  // already disabled to make the two-phase interface more consistent.
+  // Obtaining the generators already marks the writer as being iterated over,
+  // even though iteration has not started yet.
+  auto generators = writer.getAllGenerators();
+  ASSERT_EQ(generators.size(), 1);
 
   AD_EXPECT_THROW_WITH_MESSAGE(
-      pushAll(), ::testing::ContainsRegex("currently being iterated"));
+      writer.writeIdTable(table),
+      ::testing::ContainsRegex("currently being iterated"));
   AD_EXPECT_THROW_WITH_MESSAGE(
       writer.clear(), ::testing::ContainsRegex("currently being iterated"));
 
+  // Starting, but not finishing the iteration also keeps the writer locked.
+  auto& generator = generators.at(0);
   auto it = generator.begin();
   AD_EXPECT_THROW_WITH_MESSAGE(
-      pushAll(), ::testing::ContainsRegex("currently being iterated"));
+      writer.writeIdTable(table),
+      ::testing::ContainsRegex("currently being iterated"));
   AD_EXPECT_THROW_WITH_MESSAGE(
       writer.clear(), ::testing::ContainsRegex("currently being iterated"));
 
+  // Fully consume the generator.
   for (; it != generator.end(); ++it) {
   }
 
-  // All generators have ended, we should be able to push and clear.
-  ASSERT_NO_THROW(pushAll());
+  // All generators have been fully consumed, so writing and clearing work
+  // again.
+  ASSERT_NO_THROW(writer.writeIdTable(table));
   ASSERT_NO_THROW(writer.clear());
 }
 
