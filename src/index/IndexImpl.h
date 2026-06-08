@@ -55,16 +55,14 @@ using FirstPermutationSorter = ExternalSorter<FirstPermutation>;
 using SecondPermutation = SortByOSP;
 using ThirdPermutation = SortByPSO;
 
-// Data produced after parsing: vocabulary metadata and the sizes of the partial
+// Data produced after parsing: vocabulary metadata and the number of partial
 // vocabularies. The ID triples themselves are written to disk (to the
 // `UNSORTED_IDS_SUFFIX` file) and read back by
 // `IndexImpl::convertPartialToGlobalIds`.
 struct IndexBuilderDataAsExternalVector {
   ad_utility::vocabulary_merger::VocabularyMetaData vocabularyMetaData_;
-  // The i-th entry is the actual number of triples of the i-th batch, which
-  // belongs to the i-th partial vocabulary. It might be slightly different
-  // from the specified `batchSize` because of internally added triples.
-  std::vector<size_t> numTriplesPerPartialVocab_;
+  // The number of partial vocabularies (one per batch) that were created.
+  size_t numPartialVocabs_;
 };
 
 // Store the "normal" triples sorted by the first permutation, together with
@@ -509,10 +507,11 @@ class IndexImpl {
 
   // Parse all triples from `parser` in batches of `linesPerPartial`, write one
   // partial vocabulary file per batch, write the ID triples to disk (to the
-  // `UNSORTED_IDS_SUFFIX` file), and return the number of triples per batch.
-  // The memory used by the item allocator is freed when this function returns.
-  std::vector<size_t> buildPartialVocabularies(
-      std::shared_ptr<RdfParserBase> parser, size_t linesPerPartial);
+  // `UNSORTED_IDS_SUFFIX` file), and return the number of partial vocabularies
+  // (one per batch) that were created. The memory used by the item allocator is
+  // freed when this function returns.
+  size_t buildPartialVocabularies(std::shared_ptr<RdfParserBase> parser,
+                                  size_t linesPerPartial);
 
   // ___________________________________________________________________
   IndexBuilderDataAsExternalVector passFileForVocabulary(

@@ -72,8 +72,7 @@ IndexBuilderDataAsFirstPermutationSorter IndexImpl::createIdTriplesAndVocab(
   };
 
   auto firstSorter = convertPartialToGlobalIds(
-      indexBuilderData.numTriplesPerPartialVocab_.size(),
-      isQleverInternalTriple);
+      indexBuilderData.numPartialVocabs_, isQleverInternalTriple);
 
   return {std::move(indexBuilderData.vocabularyMetaData_),
           std::move(firstSorter)};
@@ -478,7 +477,7 @@ void IndexImpl::addInternalStatisticsToConfiguration(
 }
 
 // _____________________________________________________________________________
-std::vector<size_t> IndexImpl::buildPartialVocabularies(
+size_t IndexImpl::buildPartialVocabularies(
     std::shared_ptr<RdfParserBase> parser, size_t linesPerPartial) {
   parser->integerOverflowBehavior() = turtleParserIntegerOverflowBehavior_;
   parser->invalidLiteralsAreSkipped() = turtleParserSkipIllegalLiterals_;
@@ -491,8 +490,10 @@ std::vector<size_t> IndexImpl::buildPartialVocabularies(
               << std::endl;
   bool parserExhausted = false;
 
-  // we add extra triples
-  std::vector<size_t> numTriplesPerPartialVocab;
+  // The number of partial vocabularies created so far, and the total number of
+  // triples across all of them (the latter is only used for logging below).
+  size_t numPartialVocabs = 0;
+  size_t numTriplesTotal = 0;
 
   // Each of these futures corresponds to the processing and writing of one
   // batch of triples and partial vocabulary.
@@ -584,13 +585,10 @@ std::vector<size_t> IndexImpl::buildPartialVocabularies(
     }
     writePartialVocabularyFuture[writePartialVocabularyFuture.size() - 1] =
         writeNextPartialVocabulary(
-            numTriplesParsed, numTriplesPerPartialVocab.size(),
-            actualCurrentPartialSize, std::move(oldItemPtr),
-            std::move(localWriter), &idTriples);
-    // Save the information how many triples this partial vocabulary actually
-    // deals with we will use this later for mapping from partial to global
-    // ids
-    numTriplesPerPartialVocab.push_back(actualCurrentPartialSize);
+            numTriplesParsed, numPartialVocabs, actualCurrentPartialSize,
+            std::move(oldItemPtr), std::move(localWriter), &idTriples);
+    ++numPartialVocabs;
+    numTriplesTotal += actualCurrentPartialSize;
   }
   AD_LOG_INFO << progressBar.getFinalProgressString() << std::flush;
   for (auto& future : writePartialVocabularyFuture) {
@@ -602,23 +600,20 @@ std::vector<size_t> IndexImpl::buildPartialVocabularies(
   // read back by `convertPartialToGlobalIds`.
   idTriples.wlock()->close();
   AD_LOG_INFO << "Number of triples created (including QLever-internal ones): "
-              << ::ranges::accumulate(numTriplesPerPartialVocab, size_t{0})
-              << " [may contain duplicates]" << std::endl;
+              << numTriplesTotal << " [may contain duplicates]" << std::endl;
   if (addHasWordTriples_) {
     AD_LOG_INFO << "Number of `ql:has-word` triples created: "
                 << numHasWordTriples.load() << std::endl;
   }
-  AD_LOG_INFO << "Number of partial vocabularies created: "
-              << numTriplesPerPartialVocab.size() << std::endl;
-  return numTriplesPerPartialVocab;
+  AD_LOG_INFO << "Number of partial vocabularies created: " << numPartialVocabs
+              << std::endl;
+  return numPartialVocabs;
 }
 
 // _____________________________________________________________________________
 IndexBuilderDataAsExternalVector IndexImpl::passFileForVocabulary(
     std::shared_ptr<RdfParserBase> parser, size_t linesPerPartial) {
-  auto numTriplesPerPartialVocab =
-      buildPartialVocabularies(parser, linesPerPartial);
-  auto numPartialVocabs = numTriplesPerPartialVocab.size();
+  auto numPartialVocabs = buildPartialVocabularies(parser, linesPerPartial);
 
   size_t sizeInternalVocabulary = 0;
   std::vector<std::string> prefixes;
@@ -656,7 +651,7 @@ IndexBuilderDataAsExternalVector IndexImpl::passFileForVocabulary(
   AD_LOG_DEBUG << "Triples per partial vocabulary: " << linesPerPartial
                << std::endl;
 
-  return {std::move(mergeRes), std::move(numTriplesPerPartialVocab)};
+  return {std::move(mergeRes), numPartialVocabs};
 }
 
 // _____________________________________________________________________________
