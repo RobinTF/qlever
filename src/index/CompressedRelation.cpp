@@ -6,6 +6,8 @@
 
 #include "index/CompressedRelation.h"
 
+#include <deque>
+#include <future>
 #include <thread>
 
 #include "engine/idTable/CompressedExternalIdTable.h"
@@ -19,7 +21,6 @@
 #include "index/LocatedTriples.h"
 #include "util/CompressionUsingZstd/ZstdWrapper.h"
 #include "util/Iterators.h"
-#include "util/ThreadSafeQueue.h"
 #include "util/Timer.h"
 #include "util/TypeTraits.h"
 
@@ -29,6 +30,22 @@ using namespace std::chrono_literals;
 template <typename T>
 static auto getBeginAndEnd(T& range) {
   return std::pair{ql::ranges::begin(range), ql::ranges::end(range)};
+}
+
+// The shared thread pool that decompresses the blocks of all lazy index scans.
+// Using a single global pool bounds the total number of decompression threads,
+// instead of spawning a fresh set of threads for every individual index scan.
+// The pool's task queue is unbounded (submitting never blocks); the read-ahead
+// of a single scan is bounded by its window of in-flight blocks (see
+// `asyncParallelBlockGenerator`). The number of threads is taken from
+// `lazy-index-scan-num-threads` when the pool is first used; later changes to
+// that parameter have no effect.
+static ad_utility::TaskQueue<false>& lazyScanThreadPool() {
+  static ad_utility::TaskQueue<false> pool{
+      std::numeric_limits<size_t>::max(),
+      getRuntimeParameter<&RuntimeParameters::lazyIndexScanNumThreads_>(),
+      "lazy index scans"};
+  return pool;
 }
 
 // TODO @realHannes:
@@ -150,6 +167,10 @@ CompressedRelationReader::asyncParallelBlockGenerator(
 
   struct Generator
       : public ad_utility::InputRangeFromGet<IdTable, LazyScanMetadata> {
+    // The result of reading and decompressing a single block. `nullopt` means
+    // that the block was skipped because of the graph filter.
+    using BlockResult = std::optional<DecompressedBlockAndMetadata>;
+
     const T beginBlock_;
     const T endBlock_;
     T blockMetadataIterator_;
@@ -159,10 +180,11 @@ CompressedRelationReader::asyncParallelBlockGenerator(
     const CompressedRelationReader* reader_;
     ad_utility::Timer popTimer_{
         ad_utility::timer::Timer::InitialStatus::Stopped};
-    std::mutex blockIteratorMutex_;
-    ad_utility::InputRangeTypeErased<
-        std::optional<DecompressedBlockAndMetadata>>
-        queue_;
+    // The blocks whose decompression is currently running on (or queued for)
+    // the shared thread pool, in block order. We read at most `maxReadAhead_`
+    // blocks ahead of the consumer.
+    std::deque<std::future<BlockResult>> blocksInFlight_;
+    size_t maxReadAhead_ = 0;
     bool needsStart_{true};
 
     Generator(T beginBlock, T endBlock, const ScanImplConfig& scanConfig,
@@ -177,84 +199,74 @@ CompressedRelationReader::asyncParallelBlockGenerator(
           limitOffset_{limitOffset},
           reader_{reader} {}
 
-    void start() {
-      auto numThreads{
-          getRuntimeParameter<&RuntimeParameters::lazyIndexScanNumThreads_>()};
-      auto queueSize{
-          getRuntimeParameter<&RuntimeParameters::lazyIndexScanQueueSize_>()};
-      auto producer{std::bind(&Generator::readAndDecompressBlock, this)};
-
-      // Prepare queue for reading and decompressing blocks concurrently using
-      // `numThreads` threads.
-      queue_ = ad_utility::data_structures::queueManager<
-          ad_utility::data_structures::OrderedThreadSafeQueue<
-              std::optional<DecompressedBlockAndMetadata>>>(
-          queueSize, numThreads, producer);
+    // The decompression tasks on the pool capture `reader_` and `scanConfig_`,
+    // so we must wait for them to finish before this generator is destroyed.
+    ~Generator() {
+      for (auto& block : blocksInFlight_) {
+        block.wait();
+      }
     }
 
-    std::optional<
-        std::pair<size_t, std::optional<DecompressedBlockAndMetadata>>>
-    readAndDecompressBlock() {
-      cancellationHandle_->throwIfCancelled();
-      std::unique_lock lock{blockIteratorMutex_};
-      if (blockMetadataIterator_ == endBlock_) {
-        return std::nullopt;
-      }
+    // A future that already holds `value`, used for blocks that are skipped
+    // without any IO or decompression.
+    static std::future<BlockResult> readyFuture(BlockResult value) {
+      std::promise<BlockResult> promise;
+      promise.set_value(std::move(value));
+      return promise.get_future();
+    }
 
-      // Note: taking a copy here is probably not necessary (the lifetime of
-      // all the blocks is long enough, so a `const&` would suffice), but the
-      // copy is cheap and makes the code more robust.
+    // Read the compressed block that `blockMetadataIterator_` points at from
+    // the file (serial IO on the calling thread) and submit its (parallelizable)
+    // decompression to the shared thread pool. Advances the iterator.
+    void readAndSubmitNextBlock() {
       auto blockMetadata = *blockMetadataIterator_;
-      // Note: The order of the following two lines is important: The index
-      // of the current blockMetadata depends on the current value of
-      // `blockMetadataIterator`, so we have to compute it before incrementing
-      // the iterator.
-      auto myIndex = static_cast<size_t>(blockMetadataIterator_ - beginBlock_);
       ++blockMetadataIterator_;
       if (scanConfig_.graphFilter_.canBlockBeSkipped(blockMetadata)) {
-        return std::pair{myIndex, std::nullopt};
+        blocksInFlight_.push_back(readyFuture(std::nullopt));
+        return;
       }
-      // Note: the reading of the blockMetadata could also happen without
-      // holding the lock. We still perform it inside the lock to avoid
-      // contention of the file. On a fast SSD we could possibly change this,
-      // but this has to be investigated.
       auto compressedBlock = reader_->readCompressedBlockFromFile(
           blockMetadata, scanConfig_.scanColumns_);
+      blocksInFlight_.push_back(lazyScanThreadPool().submit(
+          [reader = reader_, &scanConfig = scanConfig_,
+           compressedBlock = std::move(compressedBlock),
+           blockMetadata]() -> BlockResult {
+            return reader->decompressAndPostprocessBlock(
+                compressedBlock, blockMetadata.numRows_, scanConfig,
+                blockMetadata);
+          }));
+    }
 
-      lock.unlock();
-      auto decompressedBlockAndMetadata =
-          reader_->decompressAndPostprocessBlock(compressedBlock,
-                                                 blockMetadata.numRows_,
-                                                 scanConfig_, blockMetadata);
-      return std::pair{myIndex,
-                       std::optional{std::move(decompressedBlockAndMetadata)}};
-    };
+    // Read and submit blocks until the read-ahead window is full or all blocks
+    // have been submitted.
+    void fillReadAhead() {
+      while (blocksInFlight_.size() < maxReadAhead_ &&
+             blockMetadataIterator_ != endBlock_) {
+        readAndSubmitNextBlock();
+      }
+    }
 
     std::optional<IdTable> get() override {
       if (std::exchange(needsStart_, false)) {
-        start();
+        maxReadAhead_ =
+            getRuntimeParameter<&RuntimeParameters::lazyIndexScanQueueSize_>();
+        fillReadAhead();
       }
 
-      // Yield the blocks (in the right order) as soon as they become
+      // Yield the decompressed blocks in order, as soon as they become
       // available. Stop when all the blocks have been yielded or the LIMIT of
       // the query is reached. Keep track of various statistics.
-      while (true) {
-        popTimer_.cont();
-        auto&& item{queue_.get()};  // copy elision
-        popTimer_.stop();
+      while (!blocksInFlight_.empty()) {
+        cancellationHandle_->throwIfCancelled();
 
+        popTimer_.cont();
+        auto optBlock = blocksInFlight_.front().get();
+        blocksInFlight_.pop_front();
+        popTimer_.stop();
         details().blockingTime_ = popTimer_.msecs();
 
-        if (item == std::nullopt) {
-          break;
-        }
-
-        if (cancellationHandle_->isCancelled()) {
-          details().blockingTime_ = popTimer_.msecs();
-          cancellationHandle_->throwIfCancelled();
-        }
-
-        auto& optBlock{item.value()};
+        // Keep the pool busy by refilling the read-ahead window.
+        fillReadAhead();
 
         details().update(optBlock);
         if (optBlock.has_value()) {
@@ -276,8 +288,8 @@ CompressedRelationReader::asyncParallelBlockGenerator(
     }
   };
 
-  // There is a std::mutex in the generator, so we cannot copy or move it,
-  // that's why it is consctucted via a unique_ptr.
+  // The generator is a polymorphic type that is consumed through the
+  // type-erased `InputRangeTypeErased`, so it is constructed via a unique_ptr.
   std::unique_ptr<ad_utility::InputRangeFromGet<IdTable, LazyScanMetadata>>
       generator{std::make_unique<Generator>(beginBlock, endBlock, scanConfig,
                                             cancellationHandle, limitOffset,
