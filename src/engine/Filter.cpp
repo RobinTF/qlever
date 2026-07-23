@@ -257,3 +257,19 @@ std::unique_ptr<Operation> Filter::cloneImpl() const {
   return std::make_unique<Filter>(_executionContext, _subtree->clone(),
                                   _expression);
 }
+
+// _____________________________________________________________________________
+std::optional<std::shared_ptr<QueryExecutionTree>> Filter::makeSortedTree(
+    const std::vector<ColumnIndex>& sortColumns) const {
+  // Try to push the sorting down to the child. If the child can produce the
+  // requested order itself (without an explicit `Sort`), re-wrap it in a
+  // `Filter`. Otherwise return `std::nullopt` so that the caller adds a `Sort`
+  // on top of this `Filter` (which is cheaper than sorting the unfiltered
+  // child).
+  auto sortedChild = _subtree->getRootOperation()->makeSortedTree(sortColumns);
+  if (!sortedChild.has_value()) {
+    return std::nullopt;
+  }
+  return ad_utility::makeExecutionTree<Filter>(
+      getExecutionContext(), std::move(sortedChild).value(), _expression);
+}
