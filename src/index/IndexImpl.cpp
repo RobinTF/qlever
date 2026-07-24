@@ -1229,9 +1229,9 @@ void IndexImpl::setOnDiskBase(const std::string& onDiskBase) {
 
 // ____________________________________________________________________________
 std::vector<ql::filesystem::path> IndexImpl::allIndexFiles(
-    const std::string& onDiskBase) {
+    std::string_view onDiskBase) {
   std::vector<ql::filesystem::path> result;
-  auto addIfExists = [&result](std::string file) {
+  auto addIfExists = [&result](ql::filesystem::path file) {
     if (ql::filesystem::exists(file)) {
       result.push_back(std::move(file));
     }

@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "Views.h"
 #include "backports/StartsWithAndEndsWith.h"
 #include "backports/algorithm.h"
 #include "backports/filesystem.h"
@@ -28,22 +29,21 @@ std::vector<fs::path> filesWithBaseNameAndSuffix(const fs::path& onDiskBase,
                                                  std::string_view suffix) {
   fs::path directory = onDiskBase.parent_path();
   if (directory.empty()) {
-    directory = ".";
+    directory = fs::current_path();
   }
   std::string prefix =
       absl::StrCat(ql::pathFilename(onDiskBase).string(), suffix);
-  // NOTE: We deliberately use an explicit loop instead of a `filter`/
-  // `transform`/`to_vector` range pipeline: `directoryRange` is a single-pass
-  // input range that is neither a view nor borrowed, so it is not a
-  // `viewable_range` and cannot be piped into `range-v3` view adaptors (this is
-  // also why the other functions in this file loop over it explicitly).
-  std::vector<fs::path> result;
-  for (const auto& entry : ql::directoryRange(directory)) {
-    if (entry.is_regular_file() &&
-        ql::starts_with(entry.path().filename().string(), prefix)) {
-      result.push_back(entry.path());
-    }
-  }
+  std::vector<fs::path> result =
+      // `to_vector` is required to please the range-v3 interface, until #3122
+      // is merged.
+      ::ranges::to_vector(ql::directoryRange(directory)) |
+      ql::views::filter(
+          [](const auto& entry) { return entry.is_regular_file(); }) |
+      ql::views::transform([](const auto& entry) { return entry.path(); }) |
+      ql::views::filter([&prefix](const auto& path) {
+        return ql::starts_with(path.filename().string(), prefix);
+      }) |
+      ::ranges::to_vector;
   return result;
 }
 

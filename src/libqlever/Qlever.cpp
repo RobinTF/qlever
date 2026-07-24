@@ -334,36 +334,33 @@ std::shared_ptr<QueryExecutionContext> Qlever::createQueryExecutionContext(
 }
 
 // ___________________________________________________________________________
-std::string IndexRebuildConfig::finalBasename() const {
-  return (dirForNewIndex_ / basenameForNewIndex_).lexically_normal().string();
-}
-
-// ___________________________________________________________________________
-void Qlever::moveRebuiltIndexIntoPlace(const std::string& originalBase,
+void Qlever::moveRebuiltIndexIntoPlace(const std::string& originalBasename,
                                        IndexAndViews& newIndexAndViews,
                                        const IndexRebuildConfig& config) {
   namespace fs = ql::filesystem;
   auto& [newIndex, newManager] = newIndexAndViews;
   const std::string rebuildBase = newIndex.getOnDiskBase();
-  const std::string newBase = config.finalBasename();
+  const std::string& targetBasenameForNewIndex = config.basenameForNewIndex_;
 
   // Move the old index's files (including its view files) into the directory
   // for the old index.
-  const auto& oldIndexDir = config.dirForOldIndex_;
-  fs::create_directories(oldIndexDir);
-  auto moveToOldIndexDir = [&oldIndexDir](const fs::path& file) {
-    fs::rename(file, oldIndexDir / file.filename());
-  };
-  ql::ranges::for_each(IndexImpl::allIndexFiles(originalBase),
-                       moveToOldIndexDir);
-  ql::ranges::for_each(MaterializedViewsManager::viewFilesOnDisk(originalBase),
-                       moveToOldIndexDir);
+  const auto& targetDirForOldIndex = config.dirForOldIndex_;
+  fs::create_directories(targetDirForOldIndex);
+  auto moveToTargetDirForOldIndex =
+      [&targetDirForOldIndex](const fs::path& file) {
+        fs::rename(file, targetDirForOldIndex / file.filename());
+      };
+  ql::ranges::for_each(IndexImpl::allIndexFiles(originalBasename),
+                       moveToTargetDirForOldIndex);
+  ql::ranges::for_each(
+      MaterializedViewsManager::viewFilesOnDisk(originalBasename),
+      moveToTargetDirForOldIndex);
   // Move the old index's build log with it (it was either built originally or
   // by a previous rebuild, so exactly one of the two variants exists).
   for (auto suffix : {INDEX_LOG_SUFFIX, REBUILD_INDEX_LOG_SUFFIX}) {
-    auto logFile = absl::StrCat(originalBase, suffix);
+    auto logFile = absl::StrCat(originalBasename, suffix);
     if (fs::exists(logFile)) {
-      moveToOldIndexDir(logFile);
+      moveToTargetDirForOldIndex(logFile);
     }
   }
 
@@ -371,22 +368,25 @@ void Qlever::moveRebuiltIndexIntoPlace(const std::string& originalBase,
   for (const auto& file : IndexImpl::allIndexFiles(rebuildBase)) {
     std::string fileString = file.string();
     AD_CORRECTNESS_CHECK(ql::starts_with(fileString, rebuildBase));
-    fs::rename(file, absl::StrCat(newBase, std::string_view{fileString}.substr(
-                                               rebuildBase.size())));
+    fs::rename(
+        file,
+        absl::StrCat(targetBasenameForNewIndex,
+                     std::string_view{fileString}.substr(rebuildBase.size())));
   }
   // Move the new index's rebuild log to its final place, next to the index it
   // describes (from where it will later travel into the directory of the old
   // index, when this index is in turn retired by a future rebuild).
   auto rebuildLog = absl::StrCat(rebuildBase, REBUILD_INDEX_LOG_SUFFIX);
   if (fs::exists(rebuildLog)) {
-    fs::rename(rebuildLog, absl::StrCat(newBase, REBUILD_INDEX_LOG_SUFFIX));
+    fs::rename(rebuildLog, absl::StrCat(targetBasenameForNewIndex,
+                                        REBUILD_INDEX_LOG_SUFFIX));
   }
 
   // Re-anchor the path-derived state of the new index.
-  newIndex.setOnDiskBase(newBase);
+  newIndex.setOnDiskBase(targetBasenameForNewIndex);
   if (newIndex.deltaTriplesManager().persists()) {
     newIndex.getImpl().setFilenamesForPersistentUpdates(false);
   }
-  newManager.setOnDiskBase(newBase);
+  newManager.setOnDiskBase(targetBasenameForNewIndex);
 }
 }  // namespace qlever

@@ -10,9 +10,10 @@
 #ifndef QLEVER_SRC_INDEX_GRAPHNAMEMANAGER_H
 #define QLEVER_SRC_INDEX_GRAPHNAMEMANAGER_H
 
+#include <gtest/gtest_prod.h>
+
 #include "backports/filesystem.h"
 #include "global/Constants.h"
-#include "gtest/gtest_prod.h"
 #include "rdfTypes/Iri.h"
 #include "util/CopyableSynchronization.h"
 #include "util/Serializer/SerializeAtomic.h"

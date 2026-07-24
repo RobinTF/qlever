@@ -86,12 +86,9 @@ struct IndexRebuildConfig {
   ql::filesystem::path dirForOldIndex_;
 
   // The directory and base name under which the new index is served after the
-  // swap (and from which a later restart loads it).
-  ql::filesystem::path dirForNewIndex_ = ".";
+  // swap (and from which a later restart loads it). Typically the same location
+  // as the existing index, so that the "current" index has a stable location.
   std::string basenameForNewIndex_;
-
-  // The base name of the new index after the swap (in its final directory).
-  std::string finalBasename() const;
 };
 
 // Additional configuration used for building an index for a given dataset.
@@ -441,16 +438,21 @@ class Qlever {
   // the new index in memory (on-disk base name, files for persisted updates and
   // graph names, and the views manager) accordingly. All target locations are
   // given by `config`; by default the new index is served from the place of the
-  // old index (so that a later restart loads the latest index). The renames
-  // keep the open file handles of both indexes valid, so running queries are
-  // not affected. This must be called BEFORE swapping in the new
-  // `IndexAndViews`, and with the guarantee that no updates are added
-  // concurrently (an update between the rename and the re-anchoring would
-  // persist to the old path). If this throws halfway through, the in-memory
-  // state still refers to a consistent old index, but some files will have been
-  // moved and other won't so when restarting files need to be moved into the
-  // proper directory first.
-  static void moveRebuiltIndexIntoPlace(const std::string& originalBase,
+  // old index (so that a later restart loads the latest index). Existing files
+  // that may still exist at the designation folder may be overwritten. Callers
+  // have to make sure the directory to write to is safe. The renames keep the
+  // open file handles of both indexes valid, so running queries are not
+  // affected. This must be called BEFORE swapping in the new `IndexAndViews`,
+  // and with the guarantee that no updates are added concurrently (an update
+  // between the rename and the re-anchoring would persist to the old path). If
+  // this throws halfway through, the in-memory state still refers to a
+  // consistent old index, but some files will have been moved and other won't
+  // so when restarting files need to be moved into the proper directory first.
+  // This should realistically never happen since all this function does is
+  // string concatenation and moving files around. This function assumes that
+  // file handles are never reopened, so moving the files while the file handle
+  // is still open is fine in POSIX compliant systems.
+  static void moveRebuiltIndexIntoPlace(const std::string& originalBasename,
                                         IndexAndViews& newIndexAndViews,
                                         const IndexRebuildConfig& config);
 

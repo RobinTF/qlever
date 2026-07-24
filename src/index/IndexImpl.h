@@ -494,7 +494,7 @@ class IndexImpl {
   // files. This is used to move an index to a different directory after a
   // rebuild.
   static std::vector<ql::filesystem::path> allIndexFiles(
-      const std::string& onDiskBase);
+      std::string_view onDiskBase);
 
   void setSettingsFile(const std::string& filename);
 

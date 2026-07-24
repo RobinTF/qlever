@@ -12,6 +12,9 @@
 
 #include <string_view>
 
+// This file contains constants for prefixes and suffixes of filenames that are
+// used by QLever to persistently store data on disk.
+
 constexpr inline std::string_view VOCAB_SUFFIX = ".vocabulary";
 constexpr inline std::string_view META_FILE_SUFFIX = ".meta";
 constexpr inline std::string_view CONFIGURATION_FILE = ".meta-data.json";
@@ -39,12 +42,12 @@ constexpr inline std::string_view UPDATE_TRIPLES_SUFFIX = ".update-triples";
 constexpr inline std::string_view ALLOCATED_GRAPHS_SUFFIX =
     ".allocated-graphs-state";
 
-// The build log of an index. There are two variants: the log of an originally
-// built index (written by `qlever index`) and the log of a rebuilt index
-// (written by the `rebuild-index` command). It belongs to the index it
-// describes and hence travels with it when the index is moved (in particular,
-// when a rebuilt index takes the place of the old one).
+// The build log of an index. QLever does not write this directly, but
+// `qlever-control` creates this file to persist QLever's stdout. To preserve
+// that is has to move alongside the index.
 constexpr inline std::string_view INDEX_LOG_SUFFIX = ".index-log.txt";
+
+// The build log of an index rebuild, in the same directory as the index.
 constexpr inline std::string_view REBUILD_INDEX_LOG_SUFFIX =
     ".rebuild-index-log.txt";
 
