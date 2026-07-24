@@ -793,21 +793,6 @@ TEST(IndexRebuilder, lazyScanNumThreadsOverride) {
 }
 
 // _____________________________________________________________________________
-TEST(IndexRebuildConfig, baseNames) {
-  qlever::IndexRebuildConfig config;
-  config.basenameForNewIndex_ = "wiki";
-
-  config.tmpDirForRebuild_ = "rebuild.tmp";
-  config.dirForNewIndex_ = "some/dir";
-  EXPECT_EQ(config.finalBasename(), "some/dir/wiki");
-
-  // The paths are normalized.
-  config.dirForNewIndex_ = ".";
-  EXPECT_EQ(config.finalBasename(), "wiki");
-  config.tmpDirForRebuild_ = "a/./b";
-}
-
-// _____________________________________________________________________________
 // Build an "old" index and a freshly "rebuilt" index (in a temporary
 // directory), then move the rebuilt index into the place of the old one and
 // check the resulting on-disk layout and the re-anchored in-memory state.
@@ -829,11 +814,7 @@ TEST(Qlever, moveRebuiltIndexIntoPlace) {
   qlever::IndexRebuildConfig config;
   config.tmpDirForRebuild_ = tmpDir;
   config.dirForOldIndex_ = baseFolder + "/previous";
-  config.dirForNewIndex_ = baseFolder;
-  config.basenameForNewIndex_ = "index";
-  // The new index is served from the place of the old index.
-  ASSERT_EQ(config.finalBasename(),
-            ql::filesystem::path{oldBase}.lexically_normal().string());
+  config.basenameForNewIndex_ = baseFolder + "/index";
 
   qlever::Qlever::IndexAndViews indexAndViews{
       std::move(rebuilt), MaterializedViewsManager{rebuiltBase}};
@@ -847,12 +828,12 @@ TEST(Qlever, moveRebuiltIndexIntoPlace) {
 
   // The rebuilt index now lives at the final base name (the place of the old
   // index) and no longer in the temporary directory.
-  EXPECT_TRUE(ql::filesystem::exists(config.dirForNewIndex_ /
-                                     ("index"s + CONFIGURATION_FILE)));
   EXPECT_TRUE(
-      ql::filesystem::exists(config.dirForNewIndex_ / "index.index.pso"));
+      ql::filesystem::exists(config.basenameForNewIndex_ + CONFIGURATION_FILE));
+  EXPECT_TRUE(
+      ql::filesystem::exists(config.basenameForNewIndex_ + ".index.pso"));
   EXPECT_TRUE(IndexImpl::allIndexFiles(rebuiltBase).empty());
 
   // The in-memory state of the new index was re-anchored to the final base.
-  EXPECT_EQ(indexAndViews.index_.getOnDiskBase(), config.finalBasename());
+  EXPECT_EQ(indexAndViews.index_.getOnDiskBase(), config.basenameForNewIndex_);
 }

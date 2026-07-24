@@ -34,9 +34,11 @@ std::vector<fs::path> filesWithBaseNameAndSuffix(const fs::path& onDiskBase,
   std::string prefix =
       absl::StrCat(ql::pathFilename(onDiskBase).string(), suffix);
   std::vector<fs::path> result =
-      // `to_vector` is required to please the range-v3 interface, until #3122
-      // is merged.
-      ::ranges::to_vector(ql::directoryRange(directory)) |
+      // `directoryRange` returns a type that is not working well together with
+      // `::ranges::to_vector`, so we wrap it inside `InputRangeTypeErased` to
+      // work around this issue.
+      ad_utility::OwningView{
+          ad_utility::InputRangeTypeErased{ql::directoryRange(directory)}} |
       ql::views::filter(
           [](const auto& entry) { return entry.is_regular_file(); }) |
       ql::views::transform([](const auto& entry) { return entry.path(); }) |
