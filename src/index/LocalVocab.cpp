@@ -123,6 +123,33 @@ bool LocalVocab::isBlankNodeIndexContained(
 }
 
 // _____________________________________________________________________________
+Id LocalVocab::getOrCreateLabeledBlankNode(
+    ad_utility::BlankNodeManager* blankNodeManager, Id solutionToken,
+    std::string_view label) {
+  auto key = solutionToken.getBits();
+  if (primaryLabeledBlankNodes_ != nullptr) {
+    if (auto blankNode = primaryLabeledBlankNodes_->find(key, label)) {
+      return blankNode.value();
+    }
+  }
+  for (const auto& blankNodes : otherLabeledBlankNodes_) {
+    if (auto blankNode = blankNodes->find(key, label)) {
+      return blankNode.value();
+    }
+  }
+  // Same as for the words, the primary map must not be modified once it is
+  // shared with other `LocalVocab`s.
+  AD_CORRECTNESS_CHECK(!copied_->load());
+  if (primaryLabeledBlankNodes_ == nullptr) {
+    primaryLabeledBlankNodes_ = std::make_shared<LabeledBlankNodes>();
+  }
+  auto blankNode =
+      Id::makeFromBlankNodeIndex(getBlankNodeIndex(blankNodeManager));
+  primaryLabeledBlankNodes_->insert(key, label, blankNode);
+  return blankNode;
+}
+
+// _____________________________________________________________________________
 LocalVocab::LifetimeExtender LocalVocab::getLifetimeExtender() const {
   std::vector<std::shared_ptr<const Set>> wordSets;
   wordSets.reserve(otherWordSets_.size() + 1);

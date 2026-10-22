@@ -79,11 +79,6 @@ TEST(OrderByComparator, getTermKind) {
   EXPECT_EQ(kind(UndefId()), TermKind::Undefined);
 
   EXPECT_EQ(kind(BlankNodeId(3)), TermKind::BlankNode);
-  auto blankNodeOfBnodeFunction = LocalVocabEntry::fromStringRepresentation(
-      absl::StrCat(QLEVER_INTERNAL_BLANK_NODE_IRI_PREFIX, "_:un_label_0>"),
-      context);
-  EXPECT_EQ(kind(Id::makeFromLocalVocabIndex(&blankNodeOfBnodeFunction)),
-            TermKind::BlankNode);
 
   EXPECT_EQ(kind(getId("<x>")), TermKind::Iri);
   auto localIri = LocalVocabEntry::fromStringRepresentation("<a:1>", context);
@@ -120,9 +115,6 @@ TEST(OrderByComparator, compare) {
   auto local = [](const LocalVocabEntry& entry) {
     return Id::makeFromLocalVocabIndex(&entry);
   };
-  auto blankNodeOfBnodeFunction = LocalVocabEntry::fromStringRepresentation(
-      absl::StrCat(QLEVER_INTERNAL_BLANK_NODE_IRI_PREFIX, "_:un_label_0>"),
-      context);
   auto a1 = LocalVocabEntry::fromStringRepresentation("<a:1>", context);
   auto a2 = LocalVocabEntry::fromStringRepresentation("<a:2>", context);
   auto alx = LocalVocabEntry::literalWithoutQuotes("alx", context);
@@ -138,9 +130,7 @@ TEST(OrderByComparator, compare) {
   // can only represent multiples of 32, like `d53 + 64`.
   std::vector<std::vector<Id>> groups{
       {UndefId()},
-      // Blank nodes. Those of the `BNODE` function come first, because their
-      // datatype (`LocalVocabIndex`) is smaller.
-      {local(blankNodeOfBnodeFunction)},
+      // Blank nodes.
       {BlankNodeId(3)},
       {BlankNodeId(7)},
       // IRIs.

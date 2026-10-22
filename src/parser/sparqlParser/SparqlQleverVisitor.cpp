@@ -449,7 +449,13 @@ PathObjectPairs joinPredicateAndObject(const VarOrPath& predicate,
 // ___________________________________________________________________________
 template <typename Context>
 SparqlExpressionPimpl Visitor::visitExpressionPimpl(Context* ctx) {
-  return {visit(ctx), getOriginalInputForContext(ctx)};
+  ExpressionPtr expression = visit(ctx);
+  // Several calls of `BNODE` with the same argument within the same expression
+  // have to return the same blank node (see `BlankNodeExpression.cpp`).
+  if (sparqlExpression::countLabeledBlankNodeExpressions(*expression) > 1) {
+    sparqlExpression::shareLabeledBlankNodesWithinEvaluation(*expression);
+  }
+  return {std::move(expression), getOriginalInputForContext(ctx)};
 }
 
 // ____________________________________________________________________________________
@@ -509,9 +515,31 @@ SelectClause Visitor::visit(Parser::SelectClauseContext* ctx) {
 
   if (ctx->asterisk) {
     select.setAsterisk();
-  } else {
-    select.setSelected(visitVector(ctx->varOrAlias()));
+    return select;
   }
+  auto varsOrAliases = visitVector(ctx->varOrAlias());
+  // With `GROUP BY`, the aliases are evaluated by the `GroupBy` with a single
+  // `EvaluationContext`, so the calls of `BNODE` with the same argument in
+  // different aliases can share their blank nodes via that context (see
+  // `BlankNodeExpression.cpp`). Without `GROUP BY`, the aliases become `BIND`s,
+  // which are handled by `GraphPattern::shareLabeledBlankNodes`.
+  std::vector<sparqlExpression::SparqlExpression*> aliasExpressions;
+  for (auto& varOrAlias : varsOrAliases) {
+    if (auto* alias = std::get_if<Alias>(&varOrAlias)) {
+      aliasExpressions.push_back(alias->_expression.getPimpl());
+    }
+  }
+  size_t numLabeledBlankNodes = 0;
+  for (auto* expression : aliasExpressions) {
+    numLabeledBlankNodes +=
+        sparqlExpression::countLabeledBlankNodeExpressions(*expression);
+  }
+  if (numLabeledBlankNodes > 1) {
+    for (auto* expression : aliasExpressions) {
+      sparqlExpression::shareLabeledBlankNodesWithinEvaluation(*expression);
+    }
+  }
+  select.setSelected(std::move(varsOrAliases));
   return select;
 }
 
@@ -1260,6 +1288,7 @@ GraphPattern Visitor::visit(Parser::GroupGraphPatternContext* ctx) {
   }
   auto [subOps, filters] = visit(ctx->groupGraphPatternSub());
   pattern._graphPatterns = std::move(subOps);
+  pattern.shareLabeledBlankNodes(makeInternalVariableGenerator());
   for (auto& filter : filters) {
     selectExistsVariables(filter);
     if (auto langFilterData = filter.expression_.getLanguageFilterExpression();

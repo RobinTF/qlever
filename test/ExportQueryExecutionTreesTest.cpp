@@ -4,6 +4,7 @@
 //          Robin Textor-Falconi <robintf@cs.uni-freiburg.de>
 //          Hannah Bast <bast@cs.uni-freiburg.de>
 
+#include <absl/strings/str_split.h>
 #include <gmock/gmock.h>
 
 #include "./WordsAndDocsFileLineCreator.h"
@@ -1302,54 +1303,26 @@ TEST(ExportQueryExecutionTrees, BlankNode) {
       makeExpectedSparqlJSON({makeJSONBinding(std::nullopt, "bnode", "bn0")}),
       expectedXml};
   runSelectQueryTestCase(testCaseBlankNode);
-  // Note: Blank nodes cannot be introduced in a `VALUES` clause, so they can
-  // never be part of the local vocabulary. For this reason we don't need a
-  // `VALUES` clause in the test query like in the test cases above.
-  kg = "<s> <p> <o>";
+  // The blank nodes of the `BNODE` function are exported like the other blank
+  // nodes that are not part of the index. Their labels depend on the
+  // `BlankNodeManager`, so we only check which of them are equal.
   objectQuery =
-      "SELECT (BNODE(\"1\") AS ?a) (BNODE(?x) AS ?b) WHERE { VALUES (?x) { (1) "
-      "(2) } }";
-  expectedXml = makeXMLHeader({"a", "b"}) +
-                R"(
-  <result>
-    <binding name="a"><bnode>un1_0</bnode></binding>
-    <binding name="b"><bnode>un1_0</bnode></binding>
-  </result>
-  <result>
-    <binding name="a"><bnode>un1_1</bnode></binding>
-    <binding name="b"><bnode>un2_1</bnode></binding>
-  </result>)" + xmlTrailer;
-  testCaseBlankNode = TestCaseSelectQuery{
-      kg, objectQuery, 2,
-      // TSV
-      "?a\t?b\n"
-      "_:un1_0\t_:un1_0\n"
-      "_:un1_1\t_:un2_1\n",
-      // CSV
-      "a,b\n"
-      "_:un1_0,_:un1_0\n"
-      "_:un1_1,_:un2_1\n",
-      []() {
-        nlohmann::json j;
-        j.push_back(std::vector{"_:un1_0"s, "_:un1_0"s});
-        j.push_back(std::vector{"_:un1_1"s, "_:un2_1"s});
-        return j;
-      }(),
-      []() {
-        nlohmann::json j;
-        j["head"]["vars"].push_back("a");
-        j["head"]["vars"].push_back("b");
-        auto& bindings = j["results"]["bindings"];
-        bindings.emplace_back();
-        bindings.back()["a"] = makeJSONBinding(std::nullopt, "bnode", "un1_0");
-        bindings.back()["b"] = makeJSONBinding(std::nullopt, "bnode", "un1_0");
-        bindings.emplace_back();
-        bindings.back()["a"] = makeJSONBinding(std::nullopt, "bnode", "un1_1");
-        bindings.back()["b"] = makeJSONBinding(std::nullopt, "bnode", "un2_1");
-        return j;
-      }(),
-      expectedXml};
-  runSelectQueryTestCase(testCaseBlankNode);
+      "SELECT (BNODE(\"1\") AS ?a) (BNODE(?x) AS ?b) WHERE { VALUES (?x) { "
+      "(\"1\") (\"2\") } }";
+  auto tsv =
+      runQueryStreamableResult(kg, objectQuery, ad_utility::MediaType::tsv);
+  std::vector<std::string> lines = absl::StrSplit(tsv, '\n');
+  ASSERT_EQ(lines.size(), 4);
+  EXPECT_EQ(lines.at(0), "?a\t?b");
+  std::vector<std::vector<std::string>> rows;
+  for (size_t i : {1, 2}) {
+    rows.push_back(absl::StrSplit(lines.at(i), '\t'));
+    EXPECT_THAT(rows.back(), ElementsAre(::testing::StartsWith("_:bn"),
+                                         ::testing::StartsWith("_:bn")));
+  }
+  EXPECT_EQ(rows.at(0).at(0), rows.at(0).at(1));
+  EXPECT_NE(rows.at(1).at(0), rows.at(1).at(1));
+  EXPECT_NE(rows.at(0).at(0), rows.at(1).at(0));
 
   TestCaseConstructQuery testCaseConstruct{
       "<a> <b> <c> . <d> <e> <f> . <g> <h> <i> . <j> <k> <l>",

@@ -4,6 +4,8 @@
 #ifndef QLEVER_SRC_PARSER_GRAPHPATTERN_H
 #define QLEVER_SRC_PARSER_GRAPHPATTERN_H
 
+#include <absl/functional/function_ref.h>
+
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -51,6 +53,15 @@ class GraphPattern {
 
   // See `ParsedQuery::isDeterministic()`.
   [[nodiscard]] bool isDeterministic() const;
+
+  // Let the calls of `BNODE` with an argument in consecutive `BIND`s of this
+  // graph pattern (not including nested graph patterns) share their blank
+  // nodes. For each such sequence of `BIND`s, this inserts a `BIND(BNODE() AS
+  // ?token)` with a new variable from `internalVariableGenerator`, see
+  // `BlankNodeExpression.cpp` for details. This function can be called again
+  // after more `BIND`s have been appended, it then reuses the existing tokens.
+  void shareLabeledBlankNodes(
+      absl::FunctionRef<Variable()> internalVariableGenerator);
 
   bool _optional;
 

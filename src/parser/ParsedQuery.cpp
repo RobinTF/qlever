@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "backports/StartsWithAndEndsWith.h"
+#include "engine/sparqlExpressions/BlankNodeExpression.h"
 #include "engine/sparqlExpressions/LiteralExpression.h"
 #include "engine/sparqlExpressions/SparqlExpressionPimpl.h"
 #include "global/RuntimeParameters.h"
@@ -324,6 +325,11 @@ void ParsedQuery::addSolutionModifiers(
   if (postQueryValuesClause_.has_value()) {
     moveAliasesAfterPostQueryValues(internalVariableGenerator);
   }
+
+  // The aliases (and the expressions of `ORDER BY` and `GROUP BY`) might have
+  // been appended as `BIND`s to the `WHERE` clause, so they have to share their
+  // blank nodes with the `BIND`s at its end.
+  _rootGraphPattern.shareLabeledBlankNodes(internalVariableGenerator);
 }
 
 // _____________________________________________________________________________
@@ -550,6 +556,74 @@ bool ParsedQuery::GraphPattern::isDeterministic() const {
                             [&isOperationDeterministic](const auto& op) {
                               return op.visit(isOperationDeterministic);
                             });
+}
+
+// ____________________________________________________________________________
+void ParsedQuery::GraphPattern::shareLabeledBlankNodes(
+    absl::FunctionRef<Variable()> internalVariableGenerator) {
+  using parsedQuery::Bind;
+  auto isBind = [](const parsedQuery::GraphPatternOperation& operation) {
+    return std::holds_alternative<Bind>(operation);
+  };
+  auto getExpression = [this](size_t i) -> sparqlExpression::SparqlExpression& {
+    return *std::get<Bind>(_graphPatterns.at(i))._expression.getPimpl();
+  };
+  // Handle each maximal sequence of consecutive `BIND`s separately, they are
+  // directly nested `Extend` operations in the SPARQL algebra.
+  size_t begin = 0;
+  while (begin < _graphPatterns.size()) {
+    if (!isBind(_graphPatterns.at(begin))) {
+      ++begin;
+      continue;
+    }
+    size_t end = begin;
+    while (end < _graphPatterns.size() && isBind(_graphPatterns.at(end))) {
+      ++end;
+    }
+    std::vector<size_t> bindsWithLabeledBlankNodes;
+    for (size_t i = begin; i < end; ++i) {
+      if (sparqlExpression::countLabeledBlankNodeExpressions(getExpression(i)) >
+          0) {
+        bindsWithLabeledBlankNodes.push_back(i);
+      }
+    }
+    // The calls within a single `BIND` already share their blank nodes via the
+    // `EvaluationContext`, so a solution token is only needed for several
+    // `BIND`s.
+    if (bindsWithLabeledBlankNodes.size() < 2) {
+      begin = end;
+      continue;
+    }
+    // Reuse an existing `BIND(BNODE() AS ?token)` before the first `BIND` with
+    // `BNODE(label)` (in particular one that was inserted by a previous call to
+    // this function), otherwise insert a new one.
+    size_t firstBind = bindsWithLabeledBlankNodes.front();
+    auto existingToken = ql::ranges::find_if(
+        _graphPatterns.begin() + begin, _graphPatterns.begin() + firstBind,
+        [](const parsedQuery::GraphPatternOperation& operation) {
+          return sparqlExpression::isBlankNodeExpressionWithoutArgument(
+              *std::get<Bind>(operation)._expression.getPimpl());
+        });
+    std::optional<Variable> token;
+    if (existingToken != _graphPatterns.begin() + firstBind) {
+      token = std::get<Bind>(*existingToken)._target;
+    } else {
+      token = internalVariableGenerator();
+      _graphPatterns.insert(
+          _graphPatterns.begin() + firstBind,
+          Bind{{sparqlExpression::makeUniqueBlankNodeExpression(), "BNODE()"},
+               token.value()});
+      for (auto& i : bindsWithLabeledBlankNodes) {
+        ++i;
+      }
+      ++end;
+    }
+    for (size_t i : bindsWithLabeledBlankNodes) {
+      sparqlExpression::shareLabeledBlankNodesViaSolutionToken(getExpression(i),
+                                                               token.value());
+    }
+    begin = end;
+  }
 }
 
 // ____________________________________________________________________________

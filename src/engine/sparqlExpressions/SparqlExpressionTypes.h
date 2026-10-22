@@ -16,6 +16,7 @@
 #include "engine/QueryExecutionContext.h"
 #include "engine/sparqlExpressions/SetOfIntervals.h"
 #include "global/Id.h"
+#include "index/LabeledBlankNodes.h"
 #include "rdfTypes/Variable.h"
 #include "util/AllocatorWithLimit.h"
 #include "util/ContainersWithAllocator.h"
@@ -146,6 +147,16 @@ struct EvaluationContext {
   // Used to modify the behavior of the RAND() expression when it is evaluated
   // as part of a GROUP BY clause.
   bool _isPartOfGroupBy = false;
+
+  // The blank nodes that `BNODE` with an argument has created during this
+  // evaluation, keyed by the index of the row of the `_inputTable`. They are
+  // used when several calls of `BNODE` in the same expression or in the aliases
+  // of the same GROUP BY have to return the same blank node for the same label
+  // within the same solution (see `BlankNodeExpression.cpp`). Within a GROUP
+  // BY, the solutions are the input rows inside of an aggregate, and the groups
+  // (keyed by their first row) outside of an aggregate.
+  LabeledBlankNodes labeledBlankNodesPerRow_;
+  LabeledBlankNodes labeledBlankNodesPerGroup_;
 
   ad_utility::SharedCancellationHandle cancellationHandle_;
 

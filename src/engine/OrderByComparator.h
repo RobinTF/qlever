@@ -14,8 +14,6 @@
 #include <cstdint>
 #include <utility>
 
-#include "backports/StartsWithAndEndsWith.h"
-#include "global/Constants.h"
 #include "global/Id.h"
 #include "global/ValueIdComparators.h"
 #include "index/LocalVocabContext.h"
@@ -66,18 +64,9 @@ class OrderByComparator {
         return begin <= index && index < end ? TermKind::Iri
                                              : TermKind::Literal;
       }
-      case Datatype::LocalVocabIndex: {
-        const LocalVocabEntry& entry = *id.getLocalVocabIndex();
-        if (entry.isLiteral()) {
-          return TermKind::Literal;
-        }
-        // `BNODE` with an argument creates blank nodes as IRIs with this
-        // prefix, see `BlankNodeExpression.cpp`.
-        return ql::starts_with(entry.toStringRepresentation(),
-                               QLEVER_INTERNAL_BLANK_NODE_IRI_PREFIX)
-                   ? TermKind::BlankNode
-                   : TermKind::Iri;
-      }
+      case Datatype::LocalVocabIndex:
+        return id.getLocalVocabIndex()->isLiteral() ? TermKind::Literal
+                                                    : TermKind::Iri;
       case Datatype::EncodedVal:
       case Datatype::SecondaryVocabIndex:
         return TermKind::Iri;

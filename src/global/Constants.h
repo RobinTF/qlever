@@ -126,13 +126,6 @@ constexpr inline std::string_view internal_graph = "internal-graph";
 }  // namespace string_constants::detail
 constexpr inline std::string_view QLEVER_INTERNAL_GRAPH_IRI =
     makeQleverInternalIriConst<string_constants::detail::internal_graph>();
-namespace string_constants::detail {
-constexpr inline std::string_view blank_node_prefix = "blank-node/";
-}  // namespace string_constants::detail
-constexpr inline std::string_view QLEVER_INTERNAL_BLANK_NODE_IRI_PREFIX =
-    ad_utility::constexprStrCat<string_constants::detail::openAngle,
-                                QLEVER_INTERNAL_PREFIX_URL,
-                                string_constants::detail::blank_node_prefix>();
 
 // The prefix of the new graph IRIs that are generated when a Graph Store
 // Protocol PUT is made without specifying a graph.

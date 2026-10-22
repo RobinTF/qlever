@@ -107,12 +107,6 @@ std::optional<Literal> getLiteralOrNullopt(
 // are replaced.
 std::string replaceAnglesByQuotes(std::string iriString);
 
-// Return the blank-node string representation if `iri` is a blank-node IRI,
-// otherwise std::nullopt.
-template <typename IriType>
-std::optional<std::string_view> blankNodeIriToString(
-    const IriType& iri AD_LIFETIMEBOUND);
-
 // Acts as a helper to retrieve a LiteralOrIri object from an Id, where the Id
 // is of type `VocabIndex`, `LocalVocabIndex`, `SecondaryVocabIndex`, or
 // `EncodedVal`. This function should only be called with suitable `Datatype`
@@ -146,11 +140,6 @@ CPP_template(bool removeQuotesAndAngleBrackets = false,
   if constexpr (returnOnlyLiterals) {
     if (!word.isLiteral()) {
       return std::nullopt;
-    }
-  }
-  if (word.isIri()) {
-    if (auto blankNodeString = blankNodeIriToString(word.getIri())) {
-      return std::pair{std::string{blankNodeString.value()}, nullptr};
     }
   }
   if constexpr (removeQuotesAndAngleBrackets) {

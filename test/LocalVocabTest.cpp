@@ -260,6 +260,44 @@ TEST(LocalVocab, merge) {
   EXPECT_TRUE(vocE.isBlankNodeIndexContained(id2));
 }
 
+// Test that the labeled blank nodes are found in the same and in merged
+// `LocalVocab`s, but nowhere else.
+TEST(LocalVocab, getOrCreateLabeledBlankNode) {
+  ad_utility::BlankNodeManager bnm;
+  auto token1 = Id::makeFromInt(1);
+  auto token2 = Id::makeFromInt(2);
+  LocalVocab vocabA;
+  auto a1 = vocabA.getOrCreateLabeledBlankNode(&bnm, token1, "a");
+  EXPECT_EQ(a1.getDatatype(), Datatype::BlankNodeIndex);
+  EXPECT_TRUE(vocabA.isBlankNodeIndexContained(a1.getBlankNodeIndex()));
+  EXPECT_EQ(vocabA.getOrCreateLabeledBlankNode(&bnm, token1, "a"), a1);
+  auto b1 = vocabA.getOrCreateLabeledBlankNode(&bnm, token1, "b");
+  auto a2 = vocabA.getOrCreateLabeledBlankNode(&bnm, token2, "a");
+  EXPECT_NE(a1, b1);
+  EXPECT_NE(a1, a2);
+  EXPECT_NE(b1, a2);
+
+  // A clone (and transitively also its clones) and a merged `LocalVocab` find
+  // the blank nodes of `vocabA`.
+  LocalVocab vocabB = vocabA.clone();
+  auto c1 = vocabB.getOrCreateLabeledBlankNode(&bnm, token1, "c");
+  LocalVocab vocabC = vocabB.clone();
+  EXPECT_EQ(vocabC.getOrCreateLabeledBlankNode(&bnm, token1, "a"), a1);
+  EXPECT_EQ(vocabC.getOrCreateLabeledBlankNode(&bnm, token1, "c"), c1);
+  LocalVocab vocabD;
+  vocabD.mergeWith(vocabB);
+  EXPECT_EQ(vocabD.getOrCreateLabeledBlankNode(&bnm, token2, "a"), a2);
+
+  // An unrelated `LocalVocab` creates new blank nodes.
+  LocalVocab vocabE;
+  EXPECT_NE(vocabE.getOrCreateLabeledBlankNode(&bnm, token1, "a"), a1);
+
+  // Once `vocabA` is shared, it can't create new labeled blank nodes anymore.
+  EXPECT_EQ(vocabA.getOrCreateLabeledBlankNode(&bnm, token1, "a"), a1);
+  EXPECT_THROW(vocabA.getOrCreateLabeledBlankNode(&bnm, token1, "d"),
+               ad_utility::Exception);
+}
+
 // _____________________________________________________________________________
 TEST(LocalVocab, propagation) {
   // Query execution context (with small test index), see `IndexTestHelpers.h`.

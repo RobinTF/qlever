@@ -180,34 +180,6 @@ TEST(ExportIds, ReplaceAnglesByQuotes) {
                ad_utility::Exception);
 }
 
-using IriTypes = ::testing::Types<ad_utility::triple_component::Iri,
-                                  ad_utility::triple_component::IriView>;
-
-template <typename IriType>
-class ExportIdsBlankNodeTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(ExportIdsBlankNodeTest, IriTypes);
-
-// _____________________________________________________________________________
-TYPED_TEST(ExportIdsBlankNodeTest, blankNodeIrisAreProperlyFormatted) {
-  using IriType = TypeParam;
-  std::string_view input = "_:test";
-
-  // Keep the string representations in named locals: `IriView` stores a view,
-  // so passing the `absl::StrCat` temporary directly would dangle.
-  std::string blankNodeRepresentation =
-      absl::StrCat(QLEVER_INTERNAL_BLANK_NODE_IRI_PREFIX, input, ">");
-  auto blankNodeIri =
-      IriType::fromStringRepresentation(blankNodeRepresentation);
-  EXPECT_THAT(ql::exportIds::blankNodeIriToString(blankNodeIri),
-              ::testing::Optional(::testing::Eq(input)));
-
-  std::string nonBlankNodeRepresentation = "<some_iri>";
-  auto nonBlankNodeIri =
-      IriType::fromStringRepresentation(nonBlankNodeRepresentation);
-  EXPECT_EQ(ql::exportIds::blankNodeIriToString(nonBlankNodeIri), std::nullopt);
-}
-
 // _____________________________________________________________________________
 TEST(ExportIds, GetLiteralOrIriFromVocabIndexWithEncodedIris) {
   // Test the getLiteralOrIriFromVocabIndex function specifically with encoded
@@ -512,22 +484,6 @@ TYPED_TEST(ExportIdsLiteralOrIriToStringAndTypeTest, iris) {
        .removeQuotesAndAngleBrackets_ = "X:http://example.org/x",
        .returnOnlyLiterals_ = std::nullopt,
        .both_ = std::nullopt});
-}
-
-// _____________________________________________________________________________
-TYPED_TEST(ExportIdsLiteralOrIriToStringAndTypeTest, blankNodeIris) {
-  std::string blankNode =
-      absl::StrCat(QLEVER_INTERNAL_BLANK_NODE_IRI_PREFIX, "_:b0", ">");
-
-  // A blank node is an IRI internally, so `returnOnlyLiterals` rejects it
-  // before the blank-node check is ever reached. Otherwise, it is returned as
-  // its `_:` representation, independent of `removeQuotesAndAngleBrackets`
-  // and, notably, *without* the escape function being applied.
-  TestFixture::checkAllFlagCombinations(
-      blankNode, {.plain_ = "_:b0",
-                  .removeQuotesAndAngleBrackets_ = "_:b0",
-                  .returnOnlyLiterals_ = std::nullopt,
-                  .both_ = std::nullopt});
 }
 
 // _____________________________________________________________________________
