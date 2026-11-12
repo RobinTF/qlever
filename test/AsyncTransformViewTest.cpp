@@ -396,3 +396,76 @@ TEST(AsyncTransformView, globalExecutorAndTypeErasure) {
   }
   EXPECT_THAT(::ranges::to_vector(moved), ElementsAreArray(expected));
 }
+
+// _____________________________________________________________________________
+TEST(AsyncTransformView, runnersEndAfterMaxRunnerDuration) {
+  // The `io_context` runs one runner at a time, which makes the number of
+  // elements that a single runner transforms observable.
+  using View = AsyncTransformView<decltype(integerRange(0u)),
+                                  std::function<size_t(size_t)>>;
+  for (auto [maxRunnerDuration, numPerRunner] :
+       {std::pair{std::chrono::steady_clock::duration{0}, 1u},
+        std::pair{std::chrono::steady_clock::duration{1h}, 7u}}) {
+    boost::asio::io_context ctx;
+    std::atomic<size_t> numTransformed = 0;
+    View view{integerRange(20u),
+              [&numTransformed](size_t i) {
+                ++numTransformed;
+                return 2 * i;
+              },
+              8,
+              ctx.get_executor(),
+              View::defaultMaxNumRunners,
+              maxRunnerDuration};
+    // Reads eight elements ahead and posts a runner, which hasn't started yet,
+    // so the consumer transforms the first element itself.
+    EXPECT_EQ(view.get(), 0u);
+    EXPECT_EQ(numTransformed, 1u);
+    // A runner transforms one element if its time is up right away, and
+    // otherwise all the remaining seven elements that are in flight.
+    ASSERT_EQ(ctx.run_one(), 1u);
+    EXPECT_EQ(numTransformed, 1u + numPerRunner);
+    if (numPerRunner == 1u) {
+      // The runner that ended has left the remaining elements to the runner
+      // that it posted when it started, which again transforms one element.
+      ASSERT_EQ(ctx.run_one(), 1u);
+      EXPECT_EQ(numTransformed, 3u);
+    }
+    // All the results are correct, no matter who transformed them.
+    std::vector<size_t> expected;
+    for (size_t i : integerRange(19u)) {
+      expected.push_back(2 * (i + 1));
+    }
+    EXPECT_THAT(::ranges::to_vector(view), ElementsAreArray(expected));
+    ctx.run();
+  }
+}
+
+// _____________________________________________________________________________
+TEST(AsyncTransformView, shortMaxRunnerDurationOnThreadPool) {
+  // Every runner ends after a single element, so the elements are passed
+  // from runner to runner, which must neither lose nor duplicate any of them.
+  boost::asio::thread_pool pool{4};
+  std::atomic<size_t> numTransformed = 0;
+  auto transformation = [&numTransformed](size_t i) {
+    ++numTransformed;
+    return i + 1;
+  };
+  for ([[maybe_unused]] size_t round : integerRange(20u)) {
+    numTransformed = 0;
+    AsyncTransformView view{
+        integerRange(500u),
+        transformation,
+        8,
+        pool.get_executor(),
+        AsyncTransformView<decltype(integerRange(0u)),
+                           decltype(transformation)>::defaultMaxNumRunners,
+        std::chrono::steady_clock::duration{0}};
+    std::vector<size_t> expected;
+    for (size_t i : integerRange(500u)) {
+      expected.push_back(i + 1);
+    }
+    EXPECT_THAT(::ranges::to_vector(view), ElementsAreArray(expected));
+    EXPECT_EQ(numTransformed, 500u);
+  }
+}

@@ -11,11 +11,13 @@
 #define QLEVER_SRC_UTIL_VIEWS_ASYNCTRANSFORMVIEW_H
 
 #include <boost/asio/post.hpp>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
 #include <future>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -43,16 +45,27 @@ namespace ad_utility {
 // `transformation` of different elements runs in parallel.
 //
 // The elements that are read ahead are not handed to the `executor` one by
-// one. Instead, at most `maxNumRunners` tasks ("runners") on the `executor`
-// transform them one after the other, in their order. This keeps the elements
-// of one range (for example the blocks of one index scan) on few threads, each
-// of which works through consecutive elements, so that their data stays in the
-// caches of that thread's core. Spreading them over all the threads of a busy
-// shared pool, interleaved with the elements of other ranges, lowers the
-// throughput of all of them considerably. When the consumer needs an element
-// that no runner has started yet, it transforms that element itself instead of
-// waiting for it, so the consumer never waits for a task that is still queued
-// behind the tasks of other users of the `executor`.
+// one. Instead, tasks on the `executor` ("runners") transform them one after
+// the other, in their order. This keeps the elements of one range (for example
+// the blocks of one index scan) on few threads, each of which works through
+// consecutive elements, so that their data stays in the caches of that
+// thread's core. Spreading them over all the threads of a busy shared pool,
+// interleaved with the elements of other ranges, lowers the throughput of all
+// of them considerably. When the consumer needs an element that no runner has
+// started yet, it transforms that element itself instead of waiting for it, so
+// the consumer never waits for a task that is still queued behind the tasks of
+// other users of the `executor`.
+//
+// The number of runners adapts to the load of the `executor`: at most one
+// runner of this range is queued on the `executor` at a time, and the next one
+// is only posted once it has started. On an idle `executor`, the runners start
+// right away, so this range quickly uses as many threads as it has elements
+// in flight (but at most `maxNumRunners`). On a busy `executor`, the queued
+// runner waits behind the tasks of other users, so this range stays on few
+// threads. A runner ends after it has run for `maxRunnerDuration` and requeues
+// the remaining elements at the end of the `executor`'s queue (unless another
+// runner of this range is already queued), so that a range with many elements
+// can't keep a thread to itself while other users of the `executor` wait.
 //
 // The elements of the `Range` are moved into the tasks that transform them,
 // and each result is moved out of its task when it is yielded, so both the
@@ -124,21 +137,22 @@ class AsyncTransformView
             return std::invoke(transformation, Element(std::move(element)));
           }} {}
 
-    // Transform the element, unless the slot was already claimed.
-    void runIfUnclaimed(const Transformation& transformation) {
-      if (!claimed_.test_and_set()) {
-        task_(transformation);
+    // Transform the element, unless the slot was already claimed. Return true
+    // if the element was transformed by this call.
+    bool runIfUnclaimed(const Transformation& transformation) {
+      if (claimed_.test_and_set()) {
+        return false;
       }
+      task_(transformation);
+      return true;
     }
   };
 
   // The state that is shared with the runners. A runner is a task on the
   // `executor_` that transforms the queued elements one after the other, in
-  // their order, until none is left. There are at most `maxNumRunners_` of
-  // them, so the elements of this range are processed by few threads, each of
-  // which works through consecutive elements (which keeps their data and the
-  // state of the transformation in the caches of that thread's core), instead
-  // of being spread over all the threads of the `executor_`.
+  // their order, until none is left or it has run for `maxRunnerDuration_`.
+  // Each runner works through consecutive elements, which keeps their data and
+  // the state of the transformation in the caches of that thread's core.
   //
   // NOTE: A runner that was posted but not yet started may outlive the view.
   // The destructor of the view therefore empties the queue and waits until no
@@ -151,6 +165,9 @@ class AsyncTransformView
     size_t maxNumRunners_;
     // One more runner is started per this many queued slots.
     size_t numSlotsPerRunner_;
+    // After this time, a runner ends and the remaining slots are left to a
+    // runner that is posted to the end of the queue of the `executor_`.
+    std::chrono::steady_clock::duration maxRunnerDuration_;
 
     std::mutex mutex_;
     // Notified when a runner releases its slot.
@@ -158,34 +175,68 @@ class AsyncTransformView
     // The members below are guarded by `mutex_`.
     std::deque<std::shared_ptr<Slot>> todo_;
     size_t numRunners_ = 0;
+    // The number of runners that were posted to the `executor_` but have not
+    // started yet (zero or one, see the class comment).
+    size_t numQueuedRunners_ = 0;
     // The number of runners that hold a slot (from popping it until releasing
     // it).
     size_t numBusyRunners_ = 0;
 
     Shared(const Transformation& transformation, ql::any_io_executor executor,
-           size_t maxNumElementsInFlight, size_t maxNumRunners)
+           size_t maxNumElementsInFlight, size_t maxNumRunners,
+           std::chrono::steady_clock::duration maxRunnerDuration)
         : transformation_{transformation},
           executor_{std::move(executor)},
-          maxNumRunners_{maxNumRunners} {
+          maxNumRunners_{maxNumRunners},
+          maxRunnerDuration_{maxRunnerDuration} {
       AD_CONTRACT_CHECK(maxNumElementsInFlight > 0);
       AD_CONTRACT_CHECK(maxNumRunners > 0);
       numSlotsPerRunner_ =
           std::max<size_t>(1, maxNumElementsInFlight / maxNumRunners);
     }
 
-    // Queue the `slots` and return the number of runners that the caller has
-    // to start (they are already counted in `numRunners_`). The number of
-    // runners is computed once for all the `slots`, because a runner may pop
-    // a slot before the next one is queued.
-    template <typename Slots>
-    size_t enqueue(const Slots& slots) {
-      std::lock_guard lock{mutex_};
-      ql::ranges::copy(slots, std::back_inserter(todo_));
+    // Return true if one more runner should be posted, and count it as
+    // running and queued. Requires that `mutex_` is held.
+    bool reserveRunnerIfWanted() {
       size_t wanted =
           std::min(maxNumRunners_, ceilDiv(todo_.size(), numSlotsPerRunner_));
-      size_t numNewRunners = wanted - std::min(wanted, numRunners_);
-      numRunners_ += numNewRunners;
-      return numNewRunners;
+      if (numQueuedRunners_ > 0 || numRunners_ >= wanted) {
+        return false;
+      }
+      ++numRunners_;
+      ++numQueuedRunners_;
+      return true;
+    }
+
+    // Queue the `slots` and return true if the caller has to post one runner
+    // (which is already counted in `numRunners_` and `numQueuedRunners_`).
+    template <typename Slots>
+    bool enqueue(const Slots& slots) {
+      std::lock_guard lock{mutex_};
+      ql::ranges::copy(slots, std::back_inserter(todo_));
+      return reserveRunnerIfWanted();
+    }
+
+    // Post one runner for the `shared` state to its `executor_`; the runner
+    // has to be counted already (see `reserveRunnerIfWanted`). If posting
+    // fails (which is only possible if memory runs out), the runner is not
+    // counted anymore, and the consumer transforms the queued elements itself.
+    static void post(const std::shared_ptr<Shared>& shared) noexcept {
+      try {
+        boost::asio::post(shared->executor_,
+                          [shared]() { Shared::run(shared); });
+      } catch (...) {
+        std::lock_guard lock{shared->mutex_};
+        --shared->numRunners_;
+        --shared->numQueuedRunners_;
+      }
+    }
+
+    // Called when a runner starts. Return true if it has to post the next one.
+    bool startRunner() {
+      std::lock_guard lock{mutex_};
+      --numQueuedRunners_;
+      return reserveRunnerIfWanted();
     }
 
     // Pop the next queued slot, which the calling runner then holds. If there
@@ -202,22 +253,42 @@ class AsyncTransformView
       return slot;
     }
 
-    // Release the `slot` that the calling runner holds.
-    void release(std::shared_ptr<Slot> slot) noexcept {
+    // Release the `slot` that the calling runner holds. If `retire` is true,
+    // the calling runner also ends, and the return value tells whether it has
+    // to post a runner for the remaining slots.
+    bool release(std::shared_ptr<Slot> slot, bool retire) noexcept {
       slot.reset();
       std::lock_guard lock{mutex_};
       --numBusyRunners_;
       slotReleased_.notify_all();
+      if (!retire) {
+        return false;
+      }
+      --numRunners_;
+      return reserveRunnerIfWanted();
     }
 
     // The body of a runner. It must not throw, because the destructor of the
     // view would then wait forever for the runner to release its slot. The
     // transformation can't throw here, because the `task_` stores its
     // exceptions in the future.
-    void run() noexcept {
-      while (auto slot = popOrRetire()) {
-        slot->runIfUnclaimed(transformation_);
-        release(std::move(slot));
+    static void run(const std::shared_ptr<Shared>& shared) noexcept {
+      if (shared->startRunner()) {
+        post(shared);
+      }
+      auto deadline =
+          std::chrono::steady_clock::now() + shared->maxRunnerDuration_;
+      while (auto slot = shared->popOrRetire()) {
+        // A slot that the consumer has already claimed costs no time, so the
+        // runner doesn't end because of it.
+        bool timeIsUp = slot->runIfUnclaimed(shared->transformation_) &&
+                        std::chrono::steady_clock::now() >= deadline;
+        if (shared->release(std::move(slot), timeIsUp)) {
+          post(shared);
+        }
+        if (timeIsUp) {
+          return;
+        }
       }
     }
 
@@ -252,26 +323,34 @@ class AsyncTransformView
   std::deque<Pending> pending_;
 
  public:
-  // The default number of runners, which is the number of threads that a lazy
-  // index scan had before its blocks were read on a shared thread pool.
-  static constexpr size_t defaultMaxNumRunners = 2;
+  // By default, the number of runners is only bounded by the number of
+  // elements in flight and the load of the `executor` (see the class comment).
+  static constexpr size_t defaultMaxNumRunners =
+      std::numeric_limits<size_t>::max();
+  // The default time after which a runner ends and requeues the remaining
+  // elements. It is long compared to the time it takes to post a task to an
+  // idle `executor`, and short compared to the runtime of a query.
+  static constexpr std::chrono::milliseconds defaultMaxRunnerDuration{5};
 
   // Construct from the `range` (which is stored by value, pass a
   // `ql::ranges::ref_view` to not take ownership), the `transformation`, the
   // maximal number of elements that are read ahead (which has to be at least
   // one), and the `executor` on which the transformation is run. At most
   // `maxNumRunners` threads of the `executor` work on the elements of this
-  // range at the same time.
+  // range at the same time, and each of them for at most `maxRunnerDuration`
+  // (plus the time to transform one element) at a time.
   AsyncTransformView(Range range, Transformation transformation,
                      size_t maxNumElementsInFlight,
                      ql::any_io_executor executor,
-                     size_t maxNumRunners = defaultMaxNumRunners)
+                     size_t maxNumRunners = defaultMaxNumRunners,
+                     std::chrono::steady_clock::duration maxRunnerDuration =
+                         defaultMaxRunnerDuration)
       : range_{std::move(range)},
         maxNumElementsInFlight_{maxNumElementsInFlight},
         transformation_{std::move(transformation)},
         shared_{std::make_shared<Shared>(transformation_, std::move(executor),
-                                         maxNumElementsInFlight,
-                                         maxNumRunners)} {}
+                                         maxNumElementsInFlight, maxNumRunners,
+                                         maxRunnerDuration)} {}
 
   // Elements that no runner has started yet are dropped, and the running ones
   // are waited for (they use resources of the caller).
@@ -306,12 +385,9 @@ class AsyncTransformView
       pending_.emplace_back(std::make_shared<Slot>(std::move(*it)));
       ++it;
     }
-    size_t numNewRunners =
-        shared_->enqueue(pending_ | ql::views::drop(numPendingBefore) |
-                         ql::views::transform(&Pending::slot_));
-    for (size_t i = 0; i < numNewRunners; ++i) {
-      boost::asio::post(shared_->executor_,
-                        [shared = shared_]() { shared->run(); });
+    if (shared_->enqueue(pending_ | ql::views::drop(numPendingBefore) |
+                         ql::views::transform(&Pending::slot_))) {
+      Shared::post(shared_);
     }
   }
 };
